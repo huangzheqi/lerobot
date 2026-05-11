@@ -85,6 +85,35 @@ def stage4_release_reward_gated(env: ManagerBasedRLEnv, open_joint_pos: float, l
     return s4 * torch.clamp(gripper_pos / max(open_joint_pos, 1e-3), 0.0, 1.0)
 
 
+def stage4_hold_too_long_penalty_gated(env: ManagerBasedRLEnv, close_joint_pos: float, lift_height: float, near_goal_xy: float,
+                                       release_height: float, command_name: str,
+                                       robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    _, _, _, s4 = _gates(env, lift_height, near_goal_xy, release_height, command_name, SceneEntityCfg("robot"), SceneEntityCfg("object"))
+    robot: Articulation = env.scene[robot_cfg.name]
+    gripper_idx = robot.find_joints("gripper")[0][0]
+    gripper_pos = robot.data.joint_pos[:, gripper_idx]
+    hold_close = torch.clamp((close_joint_pos - gripper_pos) / max(close_joint_pos, 1e-3), 0.0, 1.0)
+    return s4 * hold_close
+
+
+def stage4_gripper_open_near_table_gated(env: ManagerBasedRLEnv, open_joint_pos: float, near_goal_xy: float, table_height: float,
+                                         table_margin: float, command_name: str,
+                                         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+                                         object_cfg: SceneEntityCfg = SceneEntityCfg("object")) -> torch.Tensor:
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    obj: RigidObject = env.scene[object_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    near_goal = xy_dist < near_goal_xy
+    near_table = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+
+    gripper_idx = robot.find_joints("gripper")[0][0]
+    gripper_pos = robot.data.joint_pos[:, gripper_idx]
+    gripper_open = torch.clamp(gripper_pos / max(open_joint_pos, 1e-3), 0.0, 1.0)
+
+    return (near_goal & near_table).float() * gripper_open
+
+
 def stage4_stable_placed_reward_gated(env: ManagerBasedRLEnv, xy_threshold: float, table_height: float, speed_threshold: float,
                                       command_name: str,
                                       robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
