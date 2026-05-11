@@ -11,7 +11,7 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
         super().__post_init__()
 
         self.rewards.reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
-        self.rewards.lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=8.0)
+        self.rewards.lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=5.0)
 
         gate_params = {
             "command_name": "object_pose",
@@ -20,19 +20,33 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
             "release_height": 0.055,
         }
         self.rewards.stage2_goal_xy_tracking_gated = RewTerm(
-            func=mdp.stage2_goal_xy_tracking_gated, params={**gate_params, "std": 0.12}, weight=10.0
+            func=mdp.stage2_goal_xy_tracking_gated, params={**gate_params, "std": 0.12}, weight=11.0
         )
         self.rewards.stage2_early_open_penalty_gated = RewTerm(
             func=mdp.stage2_early_open_penalty_gated, params={**gate_params, "open_joint_pos": 0.40}, weight=-4.0
         )
         self.rewards.stage3_soft_descent_reward_gated = RewTerm(
-            func=mdp.stage3_soft_descent_reward_gated, params={**gate_params, "target_speed": 0.06}, weight=6.0
+            func=mdp.stage3_soft_descent_reward_gated, params={**gate_params, "target_speed": 0.05}, weight=10.0
         )
         self.rewards.stage3_hard_drop_penalty_gated = RewTerm(
             func=mdp.stage3_hard_drop_penalty_gated, params={**gate_params, "max_down_speed": 0.10}, weight=-8.0
         )
         self.rewards.stage4_release_reward_gated = RewTerm(
-            func=mdp.stage4_release_reward_gated, params={**gate_params, "open_joint_pos": 0.45}, weight=4.0
+            func=mdp.stage4_release_reward_gated, params={**gate_params, "open_joint_pos": 0.45}, weight=9.0
+        )
+        self.rewards.stage4_hold_too_long_penalty_gated = RewTerm(
+            func=mdp.stage4_hold_too_long_penalty_gated, params={**gate_params, "close_joint_pos": 0.12}, weight=-6.0
+        )
+        self.rewards.stage4_gripper_open_near_table_gated = RewTerm(
+            func=mdp.stage4_gripper_open_near_table_gated,
+            params={
+                "command_name": "object_pose",
+                "open_joint_pos": 0.45,
+                "near_goal_xy": 0.05,
+                "table_height": 0.025,
+                "table_margin": 0.018,
+            },
+            weight=8.0,
         )
         self.rewards.stage4_stable_placed_reward_gated = RewTerm(
             func=mdp.stage4_stable_placed_reward_gated,
