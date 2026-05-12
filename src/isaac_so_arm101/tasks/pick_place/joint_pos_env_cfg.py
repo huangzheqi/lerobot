@@ -15,50 +15,51 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
 
         gate_params = {
             "command_name": "object_pose",
-            "lift_height": 0.05,
-            "near_goal_xy": 0.055,
-            "release_height": 0.055,
+            "lift_height": 0.045,
+            "near_goal_xy": 0.06,
+            "release_height": 0.045,
         }
         self.rewards.stage2_goal_xy_tracking_gated = RewTerm(
-            func=mdp.stage2_goal_xy_tracking_gated, params={**gate_params, "std": 0.12}, weight=11.0
+            func=mdp.stage2_goal_xy_tracking_gated, params={**gate_params, "std": 0.12}, weight=10.0
         )
         self.rewards.stage2_early_open_penalty_gated = RewTerm(
-            func=mdp.stage2_early_open_penalty_gated, params={**gate_params, "open_joint_pos": 0.40}, weight=-4.0
+            func=mdp.stage2_early_open_penalty_gated, params={**gate_params, "open_joint_pos": 0.45, "close_joint_pos": 0.12}, weight=-5.0
         )
         self.rewards.stage3_soft_descent_reward_gated = RewTerm(
-            func=mdp.stage3_soft_descent_reward_gated, params={**gate_params, "target_speed": 0.05}, weight=10.0
+            func=mdp.stage3_soft_descent_reward_gated, params={**gate_params, "target_speed": 0.04}, weight=12.0
         )
         self.rewards.stage3_hard_drop_penalty_gated = RewTerm(
-            func=mdp.stage3_hard_drop_penalty_gated, params={**gate_params, "max_down_speed": 0.10}, weight=-8.0
+            func=mdp.stage3_hard_drop_penalty_gated, params={**gate_params, "max_down_speed": 0.08}, weight=-8.0
         )
         self.rewards.stage4_release_reward_gated = RewTerm(
-            func=mdp.stage4_release_reward_gated, params={**gate_params, "open_joint_pos": 0.45}, weight=9.0
+            func=mdp.stage4_release_reward_gated, params={**gate_params, "open_joint_pos": 0.45, "close_joint_pos": 0.12}, weight=10.0
         )
         self.rewards.stage4_hold_too_long_penalty_gated = RewTerm(
-            func=mdp.stage4_hold_too_long_penalty_gated, params={**gate_params, "close_joint_pos": 0.12}, weight=-6.0
+            func=mdp.stage4_hold_too_long_penalty_gated, params={**gate_params, "open_joint_pos": 0.45, "close_joint_pos": 0.12}, weight=-8.0
         )
         self.rewards.stage4_gripper_open_near_table_gated = RewTerm(
             func=mdp.stage4_gripper_open_near_table_gated,
             params={
                 "command_name": "object_pose",
                 "open_joint_pos": 0.45,
-                "near_goal_xy": 0.05,
+                "close_joint_pos": 0.12,
+                "near_goal_xy": 0.06,
                 "table_height": 0.025,
-                "table_margin": 0.018,
+                "table_margin": 0.02,
             },
-            weight=8.0,
+            weight=10.0,
         )
         self.rewards.stage4_stable_placed_reward_gated = RewTerm(
             func=mdp.stage4_stable_placed_reward_gated,
-            params={"command_name": "object_pose", "xy_threshold": 0.045, "table_height": 0.025, "speed_threshold": 0.08},
-            weight=14.0,
+            params={"command_name": "object_pose", "xy_threshold": 0.05, "table_height": 0.025, "speed_threshold": 0.08},
+            weight=15.0,
         )
         self.rewards.stage4_ee_away_after_place_gated = RewTerm(
             func=mdp.stage4_ee_away_after_place_gated,
             params={
                 "command_name": "object_pose",
                 "ee_min_distance": 0.08,
-                "xy_threshold": 0.045,
+                "xy_threshold": 0.05,
                 "table_height": 0.025,
                 "speed_threshold": 0.08,
                 "ee_frame_cfg": SceneEntityCfg("ee_frame"),
