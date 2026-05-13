@@ -45,6 +45,20 @@ def _gripper_open_ratio(
     return torch.clamp((joint_pos - close_joint_pos) / denom, 0.0, 1.0)
 
 
+def _get_wrist_flex_joint_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Return wrist flex joint position.
+
+    Priority: `wrist_flex`, then `wrist_.*` fallback for compatibility.
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    try:
+        wrist_idx = robot.find_joints("wrist_flex")[0][0]
+    except Exception:
+        # Fallback if the exact joint name differs in some robot variants.
+        wrist_idx = robot.find_joints("wrist_.*")[0][0]
+    return robot.data.joint_pos[:, wrist_idx]
+
+
 def _gates(env: ManagerBasedRLEnv, lift_height: float, near_goal_xy: float, release_height: float, command_name: str,
            robot_cfg: SceneEntityCfg, object_cfg: SceneEntityCfg):
     obj: RigidObject = env.scene[object_cfg.name]
@@ -110,6 +124,39 @@ def stage3_hard_drop_penalty_gated(env: ManagerBasedRLEnv, max_down_speed: float
     return s3 * torch.clamp(-(vz + max_down_speed), min=0.0)
 
 
+def stage3_ee_low_near_goal_gated(
+    env: ManagerBasedRLEnv, near_goal_xy: float, target_ee_height: float, ee_height_std: float, command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"), object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")
+) -> torch.Tensor:
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    near_goal = (xy_dist < near_goal_xy).float()
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_height = ee_frame.data.target_pos_w[..., 0, 2]
+    return near_goal * torch.exp(-torch.square(ee_height - target_ee_height) / (2 * ee_height_std * ee_height_std + 1e-6))
+
+
+def stage3_object_height_near_table_gated(
+    env: ManagerBasedRLEnv, near_goal_xy: float, table_height: float, table_margin: float, command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"), object_cfg: SceneEntityCfg = SceneEntityCfg("object")
+) -> torch.Tensor:
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    near_goal = (xy_dist < near_goal_xy).float()
+    obj: RigidObject = env.scene[object_cfg.name]
+    z = obj.data.root_pos_w[:, 2]
+    return near_goal * torch.exp(-torch.square(z - table_height) / (2 * table_margin * table_margin + 1e-6))
+
+
+def stage3_wrist_flex_release_pose_gated(
+    env: ManagerBasedRLEnv, near_goal_xy: float, wrist_target_pos: float, wrist_std: float, command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"), object_cfg: SceneEntityCfg = SceneEntityCfg("object")
+) -> torch.Tensor:
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    near_goal = (xy_dist < near_goal_xy).float()
+    wrist_pos = _get_wrist_flex_joint_pos(env, robot_cfg)
+    return near_goal * torch.exp(-torch.square(wrist_pos - wrist_target_pos) / (2 * wrist_std * wrist_std + 1e-6))
+
+
 def stage4_release_reward_gated(
     env: ManagerBasedRLEnv,
     open_joint_pos: float,
@@ -117,19 +164,24 @@ def stage4_release_reward_gated(
     lift_height: float,
     near_goal_xy: float,
     release_height: float,
+    table_height: float,
+    table_margin: float,
+    ee_low_height: float,
     command_name: str,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    _, _, _, s4 = _gates(
-        env,
-        lift_height,
-        near_goal_xy,
-        release_height,
-        command_name,
-        SceneEntityCfg("robot"),
-        SceneEntityCfg("object"),
-    )
-    return s4 * _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    near_goal = xy_dist < near_goal_xy
+    obj_low = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+    ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
+    lifted_enough = obj.data.root_pos_w[:, 2] > lift_height
+    release_band = obj.data.root_pos_w[:, 2] < (release_height + table_margin)
+    gate = (near_goal & obj_low & ee_low & lifted_enough & release_band).float()
+    return gate * _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
 
 
 def stage4_hold_too_long_penalty_gated(
@@ -139,36 +191,44 @@ def stage4_hold_too_long_penalty_gated(
     lift_height: float,
     near_goal_xy: float,
     release_height: float,
+    table_height: float,
+    table_margin: float,
+    ee_low_height: float,
     command_name: str,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    _, _, _, s4 = _gates(
-        env,
-        lift_height,
-        near_goal_xy,
-        release_height,
-        command_name,
-        SceneEntityCfg("robot"),
-        SceneEntityCfg("object"),
-    )
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    near_goal = xy_dist < near_goal_xy
+    obj_low = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+    ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
+    lifted_enough = obj.data.root_pos_w[:, 2] > lift_height
+    release_band = obj.data.root_pos_w[:, 2] < (release_height + table_margin)
+    s4 = (near_goal & obj_low & ee_low & lifted_enough & release_band).float()
     hold_close = 1.0 - _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
     return s4 * hold_close
 
 
 def stage4_gripper_open_near_table_gated(env: ManagerBasedRLEnv, open_joint_pos: float, close_joint_pos: float,
                                          near_goal_xy: float, table_height: float,
-                                         table_margin: float, command_name: str,
+                                         table_margin: float, ee_low_height: float, command_name: str,
                                          robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-                                         object_cfg: SceneEntityCfg = SceneEntityCfg("object")) -> torch.Tensor:
+                                         object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+                                         ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
     xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
     obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
 
     near_goal = xy_dist < near_goal_xy
     near_table = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+    ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
 
     gripper_open = _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
 
-    return (near_goal & near_table).float() * gripper_open
+    return (near_goal & near_table & ee_low).float() * gripper_open
 
 
 def stage4_stable_placed_reward_gated(env: ManagerBasedRLEnv, xy_threshold: float, table_height: float, speed_threshold: float,
