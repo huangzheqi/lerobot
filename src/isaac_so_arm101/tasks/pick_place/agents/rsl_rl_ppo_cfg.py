@@ -7,10 +7,10 @@ class PickPlaceCubePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 12000
     save_interval = 100
-    experiment_name = "pick_place_v8_curriculum_release"
+    experiment_name = "pick_place_v9_wrist_height_fix"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.3,
+        init_noise_std=0.28,
         actor_hidden_dims=[256, 128, 64],
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
