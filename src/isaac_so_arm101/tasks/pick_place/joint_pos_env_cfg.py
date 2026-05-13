@@ -10,8 +10,8 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.rewards.reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
-        self.rewards.lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=5.0)
+        self.rewards.reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.2)
+        self.rewards.lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=5.5)
 
         gate_params = {
             "command_name": "object_pose",
@@ -20,7 +20,7 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
             "release_height": 0.045,
         }
         self.rewards.stage2_goal_xy_tracking_gated = RewTerm(
-            func=mdp.stage2_goal_xy_tracking_gated, params={**gate_params, "std": 0.12}, weight=10.0
+            func=mdp.stage2_goal_xy_tracking_gated, params={**gate_params, "std": 0.12}, weight=11.0
         )
         self.rewards.stage2_early_open_penalty_gated = RewTerm(
             func=mdp.stage2_early_open_penalty_gated, params={**gate_params, "open_joint_pos": 0.45, "close_joint_pos": 0.12}, weight=-5.0
