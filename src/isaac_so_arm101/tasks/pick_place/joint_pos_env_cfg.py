@@ -31,11 +31,63 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
         self.rewards.stage3_hard_drop_penalty_gated = RewTerm(
             func=mdp.stage3_hard_drop_penalty_gated, params={**gate_params, "max_down_speed": 0.08}, weight=-8.0
         )
+        self.rewards.stage3_ee_low_near_goal_gated = RewTerm(
+            func=mdp.stage3_ee_low_near_goal_gated,
+            params={
+                "command_name": "object_pose",
+                "near_goal_xy": 0.07,
+                "target_ee_height": 0.060,
+                "ee_height_std": 0.020,
+                "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+            },
+            weight=14.0,
+        )
+        self.rewards.stage3_object_height_near_table_gated = RewTerm(
+            func=mdp.stage3_object_height_near_table_gated,
+            params={
+                "command_name": "object_pose",
+                "near_goal_xy": 0.07,
+                "table_height": 0.025,
+                "table_margin": 0.018,
+            },
+            weight=14.0,
+        )
+        self.rewards.stage3_wrist_flex_release_pose_gated = RewTerm(
+            func=mdp.stage3_wrist_flex_release_pose_gated,
+            params={
+                "command_name": "object_pose",
+                "near_goal_xy": 0.07,
+                # Assumption: `wrist_flex` exists and lower/negative position bends down for release.
+                "wrist_target_pos": -0.50,
+                "wrist_std": 0.40,
+            },
+            weight=2.0,
+        )
         self.rewards.stage4_release_reward_gated = RewTerm(
-            func=mdp.stage4_release_reward_gated, params={**gate_params, "open_joint_pos": 0.45, "close_joint_pos": 0.12}, weight=10.0
+            func=mdp.stage4_release_reward_gated,
+            params={
+                **gate_params,
+                "open_joint_pos": 0.45,
+                "close_joint_pos": 0.12,
+                "table_height": 0.025,
+                "table_margin": 0.025,
+                "ee_low_height": 0.070,
+                "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+            },
+            weight=12.0,
         )
         self.rewards.stage4_hold_too_long_penalty_gated = RewTerm(
-            func=mdp.stage4_hold_too_long_penalty_gated, params={**gate_params, "open_joint_pos": 0.45, "close_joint_pos": 0.12}, weight=-8.0
+            func=mdp.stage4_hold_too_long_penalty_gated,
+            params={
+                **gate_params,
+                "open_joint_pos": 0.45,
+                "close_joint_pos": 0.12,
+                "table_height": 0.025,
+                "table_margin": 0.025,
+                "ee_low_height": 0.070,
+                "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+            },
+            weight=-10.0,
         )
         self.rewards.stage4_gripper_open_near_table_gated = RewTerm(
             func=mdp.stage4_gripper_open_near_table_gated,
@@ -46,13 +98,15 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
                 "near_goal_xy": 0.06,
                 "table_height": 0.025,
                 "table_margin": 0.02,
+                "ee_low_height": 0.07,
+                "ee_frame_cfg": SceneEntityCfg("ee_frame"),
             },
-            weight=10.0,
+            weight=11.0,
         )
         self.rewards.stage4_stable_placed_reward_gated = RewTerm(
             func=mdp.stage4_stable_placed_reward_gated,
             params={"command_name": "object_pose", "xy_threshold": 0.05, "table_height": 0.025, "speed_threshold": 0.08},
-            weight=15.0,
+            weight=16.0,
         )
         self.rewards.stage4_ee_away_after_place_gated = RewTerm(
             func=mdp.stage4_ee_away_after_place_gated,
