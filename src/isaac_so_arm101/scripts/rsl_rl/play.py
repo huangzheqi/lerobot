@@ -14,6 +14,7 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import isaac_so_arm101.scripts.rsl_rl.cli_args as cli_args # isort: skip
+from isaac_so_arm101.tasks.pick_place.robust_eval_cfg import apply_pick_place_disturbance # isort: skip
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -34,6 +35,20 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--disturbance_type",
+    type=str,
+    default="off",
+    choices=["off", "cube_init", "goal", "table_friction", "clutter", "lighting", "camera", "all"],
+    help="Robustness disturbance type for pick-place eval.",
+)
+parser.add_argument(
+    "--disturbance_level",
+    type=str,
+    default="off",
+    choices=["off", "low", "medium", "high"],
+    help="Robustness disturbance level.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -96,6 +111,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    if args_cli.disturbance_type != "off" and args_cli.disturbance_level != "off":
+        env_cfg = apply_pick_place_disturbance(
+            env_cfg,
+            disturbance_type=args_cli.disturbance_type,
+            level=args_cli.disturbance_level,
+        )
+        print(
+            f"[INFO] Applied disturbance: type={args_cli.disturbance_type}, level={args_cli.disturbance_level}"
+        )
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
