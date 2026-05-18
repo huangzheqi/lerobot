@@ -69,12 +69,33 @@ def apply_pick_place_disturbance(env_cfg, disturbance_type: str, level: str):
         )
 
     if disturbance_type in ("goal", "all"):
-        dx = 0.08 * scale
-        dy = 0.10 * scale
-        dz = 0.05 * scale
-        env_cfg.commands.object_pose.ranges.pos_x = (-dx, dx)
-        env_cfg.commands.object_pose.ranges.pos_y = (-0.25 - dy, -0.12 + dy)
-        env_cfg.commands.object_pose.ranges.pos_z = (0.20, 0.30 + dz)
+        # Goal sampling is constrained to a reachable tabletop workspace for robust-play only.
+        # Design notes:
+        # - Keep x positive to avoid sampling behind the robot base.
+        # - Use symmetric y ranges so both left/right directions are evaluated.
+        # - Leave margins from table edges and a base exclusion zone near y ~= 0.
+        # - Expand low->medium->high monotonically, while keeping high reachable.
+        goal_ranges_by_level = {
+            "low": {
+                "pos_x": (0.14, 0.20),
+                "pos_y": (-0.15, 0.15),
+                "pos_z": (0.20, 0.29),
+            },
+            "medium": {
+                "pos_x": (0.13, 0.22),
+                "pos_y": (-0.19, 0.19),
+                "pos_z": (0.20, 0.31),
+            },
+            "high": {
+                "pos_x": (0.12, 0.24),
+                "pos_y": (-0.22, 0.22),
+                "pos_z": (0.20, 0.33),
+            },
+        }
+        ranges = goal_ranges_by_level[level]
+        env_cfg.commands.object_pose.ranges.pos_x = ranges["pos_x"]
+        env_cfg.commands.object_pose.ranges.pos_y = ranges["pos_y"]
+        env_cfg.commands.object_pose.ranges.pos_z = ranges["pos_z"]
 
     if disturbance_type in ("table_friction", "all"):
         dynamic = max(0.05, 0.8 - 0.65 * scale)
