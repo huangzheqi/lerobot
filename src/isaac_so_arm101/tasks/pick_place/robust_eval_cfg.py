@@ -39,13 +39,29 @@ def _level_scale(level: str) -> float:
     return level_map[level]
 
 
+def _friction_by_level(level: str) -> tuple[float, float]:
+    """Return (static_friction, dynamic_friction) for low/medium/high.
+
+    Current values:
+    - low:    static=0.6375, dynamic=0.5725
+    - medium: static=0.3750, dynamic=0.3450
+    - high:   static=0.1500, dynamic=0.1500
+    """
+    scale = _level_scale(level)
+    dynamic = max(0.05, 0.8 - 0.65 * scale)
+    static = max(0.05, 0.9 - 0.75 * scale)
+    return static, dynamic
+
+
 def apply_pick_place_disturbance(env_cfg, disturbance_type: str, level: str):
     """Apply disturbances for robustness evaluation.
 
     disturbance_type: one of
     - cube_init
     - goal
-    - table_friction
+    - table_friction (legacy alias; global contact friction disturbance)
+    - global_contact_friction (explicit name for global contact friction disturbance)
+    - table_surface_friction (table-only material override for tabletop-contact tests)
     - clutter
     - lighting
     - camera
@@ -97,10 +113,23 @@ def apply_pick_place_disturbance(env_cfg, disturbance_type: str, level: str):
         env_cfg.commands.object_pose.ranges.pos_y = ranges["pos_y"]
         env_cfg.commands.object_pose.ranges.pos_z = ranges["pos_z"]
 
-    if disturbance_type in ("table_friction", "all"):
-        dynamic = max(0.05, 0.8 - 0.65 * scale)
-        static = max(0.05, 0.9 - 0.75 * scale)
+    if disturbance_type in ("table_friction", "global_contact_friction", "all"):
+        # NOTE: This is a GLOBAL contact friction disturbance.
+        # It overrides env_cfg.sim.physics_material (global default), therefore it can affect
+        # cube-table, gripper-cube and gripper-table contacts simultaneously.
+        static, dynamic = _friction_by_level(level)
         env_cfg.sim.physics_material = RigidBodyMaterialCfg(
+            static_friction=static,
+            dynamic_friction=dynamic,
+            restitution=0.0,
+        )
+
+    if disturbance_type == "table_surface_friction":
+        # NOTE: We only override table material here so gripper-cube contact is not directly changed.
+        # API limitation: if other assets do not provide explicit per-body material, physics engines can
+        # still combine table material with counterpart/default material, so full isolation is not guaranteed.
+        static, dynamic = _friction_by_level(level)
+        env_cfg.scene.table.spawn.physics_material = RigidBodyMaterialCfg(
             static_friction=static,
             dynamic_friction=dynamic,
             restitution=0.0,
