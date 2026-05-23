@@ -2,6 +2,8 @@ import isaac_so_arm101.tasks.pick_place.mdp as mdp
 from isaac_so_arm101.tasks.lift.joint_pos_env_cfg import SoArm101LiftCubeEnvCfg, SoArm101LiftCubeEnvCfg_PLAY
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import CameraCfg
+from isaaclab.sim import PinholeCameraCfg
 from isaaclab.utils import configclass
 
 
@@ -128,3 +130,41 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
 @configclass
 class SoArm101PickPlaceCubeEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg, SoArm101LiftCubeEnvCfg_PLAY):
     pass
+
+
+@configclass
+class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.fixed_camera = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/fixed_camera",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=24.0,
+                focus_distance=400.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.55, -0.45, 0.55), rot=(0.27, 0.10, 0.33, 0.90), convention="world"),
+        )
+
+        self.scene.handeye_camera = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/gripper/handeye_camera",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=16.0,
+                focus_distance=200.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.045, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        )
+        # NOTE: If this mount fails in USD or the camera does not follow the gripper,
+        # change prim_path to: {ENV_REGEX_NS}/Robot/gripper_link/handeye_camera
