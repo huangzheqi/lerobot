@@ -142,9 +142,11 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (-0.12, 0.00, 0.10)
+        handeye_camera_pos = (0.12, -0.04, 0.12)
         # Fallback option if handeye_camera is still occluded by the robot body:
-        # handeye_camera_pos = (0.12, 0.00, 0.10)
+        # handeye_camera_pos = (0.16, -0.08, 0.14)
+        # If the view shifts completely to the other side, try:
+        # handeye_camera_pos = (0.12, 0.04, 0.12)
         # hand-eye camera rotation presets (w, x, y, z) for quick manual switching:
         # preset_a = (0.5, 0.5, -0.5, -0.5)
         # preset_b = (0.5, -0.5, 0.5, -0.5)
@@ -174,7 +176,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
             width=128,
             data_types=["rgb"],
             spawn=PinholeCameraCfg(
-                focal_length=8.0,
+                focal_length=6.0,
                 focus_distance=200.0,
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
