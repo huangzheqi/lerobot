@@ -142,8 +142,13 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.09, 0.00, 0.075)
-        handeye_camera_rot = (0.6533, -0.2706, 0.6533, -0.2706)
+        handeye_camera_pos = (0.02, 0.00, 0.065)
+        # hand-eye camera rotation presets (w, x, y, z) for quick manual switching:
+        # preset_a = (0.5, 0.5, -0.5, -0.5)
+        # preset_b = (0.5, -0.5, 0.5, -0.5)
+        # preset_c = (0.2706, -0.6533, 0.2706, -0.6533)
+        # preset_d = (0.6533, -0.2706, 0.6533, -0.2706)
+        handeye_camera_rot = (0.5, 0.5, -0.5, -0.5)
 
         self.scene.fixed_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/fixed_camera",
@@ -161,13 +166,13 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         )
 
         self.scene.handeye_camera = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/gripper_frame_link/handeye_camera",
+            prim_path="{ENV_REGEX_NS}/Robot/gripper_link/handeye_camera",
             update_period=0.0,
             height=128,
             width=128,
             data_types=["rgb"],
             spawn=PinholeCameraCfg(
-                focal_length=10.0,
+                focal_length=8.0,
                 focus_distance=200.0,
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
