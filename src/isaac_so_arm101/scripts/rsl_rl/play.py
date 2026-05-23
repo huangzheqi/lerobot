@@ -143,6 +143,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    if "Vision-Play" in task_name:
+        scene = env.unwrapped.scene
+        fixed_rgb = scene["fixed_camera"].data.output["rgb"]
+        handeye_rgb = scene["handeye_camera"].data.output["rgb"]
+        print(f"[INFO] fixed_camera rgb shape: {tuple(fixed_rgb.shape)}")
+        print(f"[INFO] handeye_camera rgb shape: {tuple(handeye_rgb.shape)}")
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
