@@ -142,11 +142,13 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.12, -0.04, 0.12)
-        # Fallback option if handeye_camera is still occluded by the robot body:
-        # handeye_camera_pos = (0.16, -0.08, 0.14)
-        # If the view shifts completely to the other side, try:
-        # handeye_camera_pos = (0.12, 0.04, 0.12)
+        handeye_camera_pos = (0.04, -0.14, 0.045)
+        # Fallback option if handeye_camera shifts to the wrong side or the gripper is not visible:
+        # handeye_camera_pos = (0.04, 0.14, 0.045)
+        # If the camera is still too close to the robot body, try:
+        # handeye_camera_pos = (0.02, -0.18, 0.055)
+        # If the tabletop is visible but the gripper is still missing, try:
+        # handeye_camera_pos = (0.02, -0.10, 0.04)
         # hand-eye camera rotation presets (w, x, y, z) for quick manual switching:
         # preset_a = (0.5, 0.5, -0.5, -0.5)
         # preset_b = (0.5, -0.5, 0.5, -0.5)
