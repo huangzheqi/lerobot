@@ -142,7 +142,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.04, -0.14, 0.045)
+        handeye_camera_pos = (0.06, -0.12, 0.04)
         # Fallback option if handeye_camera shifts to the wrong side or the gripper is not visible:
         # handeye_camera_pos = (0.04, 0.14, 0.045)
         # If the camera is still too close to the robot body, try:
@@ -172,7 +172,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         )
 
         self.scene.handeye_camera = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/gripper_link/handeye_camera",
+            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_camera",
             update_period=0.0,
             height=128,
             width=128,
@@ -184,4 +184,79 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
                 clipping_range=(0.01, 100.0),
             ),
             offset=CameraCfg.OffsetCfg(pos=handeye_camera_pos, rot=handeye_camera_rot, convention="ros"),
+        )
+
+        self.scene.handeye_debug_a = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_a",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=6.0,
+                focus_distance=200.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.06, -0.12, 0.04), rot=(0.5, 0.5, -0.5, -0.5), convention="ros"),
+        )
+
+        self.scene.handeye_debug_b = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_b",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=6.0,
+                focus_distance=200.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.06, -0.12, 0.04), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        )
+
+        self.scene.handeye_debug_c = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_c",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=6.0,
+                focus_distance=200.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.06, 0.12, 0.04), rot=(0.5, 0.5, -0.5, -0.5), convention="ros"),
+        )
+
+        self.scene.handeye_debug_d = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_d",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=6.0,
+                focus_distance=200.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.06, 0.12, 0.04), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        )
+
+        self.scene.handeye_debug_e = CameraCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_e",
+            update_period=0.0,
+            height=128,
+            width=128,
+            data_types=["rgb"],
+            spawn=PinholeCameraCfg(
+                focal_length=6.0,
+                focus_distance=200.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(pos=(0.03, -0.16, 0.05), rot=(0.5, 0.5, -0.5, -0.5), convention="ros"),
         )
