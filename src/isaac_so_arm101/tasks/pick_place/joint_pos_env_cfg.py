@@ -142,7 +142,9 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.02, 0.00, 0.065)
+        handeye_camera_pos = (-0.12, 0.00, 0.10)
+        # Fallback option if handeye_camera is still occluded by the robot body:
+        # handeye_camera_pos = (0.12, 0.00, 0.10)
         # hand-eye camera rotation presets (w, x, y, z) for quick manual switching:
         # preset_a = (0.5, 0.5, -0.5, -0.5)
         # preset_b = (0.5, -0.5, 0.5, -0.5)
