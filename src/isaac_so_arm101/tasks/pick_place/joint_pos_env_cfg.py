@@ -140,7 +140,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # Camera extrinsics for quick manual tuning:
         # - fixed_camera: z controls camera height, x/y controls the table observation position, rot controls viewing direction.
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
-        fixed_camera_pos = (0.55, -0.70, 0.75)
+        fixed_camera_pos = (0.65, -0.90, 0.90)
         fixed_camera_rot = (0.8885, 0.3973, 0.0938, 0.2097)
         handeye_camera_pos = (0.065, 0.0, 0.045)
         handeye_camera_rot = (0.5, -0.5, 0.5, -0.5)
@@ -152,7 +152,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
             width=128,
             data_types=["rgb"],
             spawn=PinholeCameraCfg(
-                focal_length=24.0,
+                focal_length=18.0,
                 focus_distance=400.0,
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
