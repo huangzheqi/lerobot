@@ -141,7 +141,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - fixed_camera: z controls camera height, x/y controls the table observation position, rot controls viewing direction.
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.55, -0.70, 0.75)
-        fixed_camera_rot = (0.35, 0.15, 0.35, 0.85)
+        fixed_camera_rot = (0.8885, 0.3973, 0.0938, 0.2097)
         handeye_camera_pos = (0.065, 0.0, 0.045)
         handeye_camera_rot = (0.5, -0.5, 0.5, -0.5)
 
@@ -157,7 +157,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
             ),
-            offset=CameraCfg.OffsetCfg(pos=fixed_camera_pos, rot=fixed_camera_rot, convention="world"),
+            offset=CameraCfg.OffsetCfg(pos=fixed_camera_pos, rot=fixed_camera_rot, convention="opengl"),
         )
 
         self.scene.handeye_camera = CameraCfg(
