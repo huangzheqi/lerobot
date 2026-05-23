@@ -137,6 +137,14 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
     def __post_init__(self):
         super().__post_init__()
 
+        # Camera extrinsics for quick manual tuning:
+        # - fixed_camera: z controls camera height, x/y controls the table observation position, rot controls viewing direction.
+        # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
+        fixed_camera_pos = (0.55, -0.70, 0.75)
+        fixed_camera_rot = (0.35, 0.15, 0.35, 0.85)
+        handeye_camera_pos = (0.065, 0.0, 0.045)
+        handeye_camera_rot = (0.5, -0.5, 0.5, -0.5)
+
         self.scene.fixed_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/fixed_camera",
             update_period=0.0,
@@ -149,11 +157,11 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
             ),
-            offset=CameraCfg.OffsetCfg(pos=(0.55, -0.45, 0.55), rot=(0.27, 0.10, 0.33, 0.90), convention="world"),
+            offset=CameraCfg.OffsetCfg(pos=fixed_camera_pos, rot=fixed_camera_rot, convention="world"),
         )
 
         self.scene.handeye_camera = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/gripper/handeye_camera",
+            prim_path="{ENV_REGEX_NS}/Robot/gripper_frame_link/handeye_camera",
             update_period=0.0,
             height=128,
             width=128,
@@ -164,7 +172,5 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
             ),
-            offset=CameraCfg.OffsetCfg(pos=(0.045, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+            offset=CameraCfg.OffsetCfg(pos=handeye_camera_pos, rot=handeye_camera_rot, convention="ros"),
         )
-        # NOTE: If this mount fails in USD or the camera does not follow the gripper,
-        # change prim_path to: {ENV_REGEX_NS}/Robot/gripper_link/handeye_camera
