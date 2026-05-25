@@ -49,6 +49,13 @@ parser.add_argument(
     choices=["off", "low", "medium", "high"],
     help="Robustness disturbance level.",
 )
+parser.add_argument(
+    "--object_pose_source",
+    type=str,
+    default="gt",
+    choices=["gt", "vision"],
+    help="Source of object pose used in policy observation.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -69,6 +76,7 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import numpy as np
 import os
 import time
 import torch
@@ -168,6 +176,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    base_env = env.unwrapped
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
@@ -208,12 +217,106 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    policy_group_name = "policy"
+    obs_term_dims = base_env.observation_manager.group_obs_term_dim[policy_group_name]
+    obs_term_names = base_env.observation_manager.group_obs_term_names[policy_group_name]
+    obs_offsets = {}
+    start_idx = 0
+    for term_name, term_dim in zip(obs_term_names, obs_term_dims):
+        end_idx = start_idx + int(term_dim[0])
+        obs_offsets[term_name] = (start_idx, end_idx)
+        start_idx = end_idx
+    if "object_position" not in obs_offsets:
+        raise RuntimeError("Could not find 'object_position' term in policy observation.")
+
+    object_slice = obs_offsets["object_position"]
+    object_asset = base_env.scene["object"]
+    robot_asset = base_env.scene["robot"]
+    fixed_camera = base_env.scene["fixed_camera"] if "Vision-Play" in task_name else None
+    last_valid_object_pos = None
+    debug_interval = 50
+    x_range = (-0.15, 0.20)
+    y_range = (-0.30, 0.30)
+
+    def _extract_rgb_uint8(camera_rgb: torch.Tensor) -> np.ndarray:
+        frame = camera_rgb[0, ..., :3].detach().cpu().numpy()
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+        return frame
+
+    def _detect_red_cube(rgb: np.ndarray) -> tuple[bool, tuple[float, float], int]:
+        r = rgb[..., 0].astype(np.int16)
+        g = rgb[..., 1].astype(np.int16)
+        b = rgb[..., 2].astype(np.int16)
+        red_mask = (r > 110) & (r > g + 35) & (r > b + 35)
+        area = int(red_mask.sum())
+        if area <= 8:
+            return False, (0.0, 0.0), area
+        ys, xs = np.nonzero(red_mask)
+        return True, (float(xs.mean()), float(ys.mean())), area
+
+    def _pixel_to_robot_xy(center_xy: tuple[float, float], width: int, height: int) -> tuple[float, float]:
+        px, py = center_xy
+        nx = px / max(width - 1, 1)
+        ny = py / max(height - 1, 1)
+        est_x = x_range[0] + nx * (x_range[1] - x_range[0])
+        est_y = y_range[1] - ny * (y_range[1] - y_range[0])
+        return est_x, est_y
+
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            gt_object_pos_world = object_asset.data.root_pos_w[:, :3]
+            robot_root_world = robot_asset.data.root_pos_w[:, :3]
+            gt_object_pos_robot = gt_object_pos_world - robot_root_world
+
+            detected = False
+            pixel_center = (0.0, 0.0)
+            pixel_area = 0
+            estimated_object_pos = gt_object_pos_robot.clone()
+            fallback_last_valid = False
+            fallback_gt = False
+
+            if args_cli.object_pose_source == "vision":
+                if fixed_camera is None:
+                    fallback_gt = True
+                    print("[WARNING] object_pose_source=vision but fixed_camera is unavailable; fallback to gt.")
+                else:
+                    rgb = _extract_rgb_uint8(fixed_camera.data.output["rgb"])
+                    detected, pixel_center, pixel_area = _detect_red_cube(rgb)
+                    if detected:
+                        est_x, est_y = _pixel_to_robot_xy(pixel_center, rgb.shape[1], rgb.shape[0])
+                        estimated_object_pos[:, 0] = est_x
+                        estimated_object_pos[:, 1] = est_y
+                        last_valid_object_pos = estimated_object_pos.clone()
+                    elif last_valid_object_pos is not None:
+                        estimated_object_pos = last_valid_object_pos.clone()
+                        fallback_last_valid = True
+                    else:
+                        fallback_gt = True
+                obs[:, object_slice[0]:object_slice[1]] = estimated_object_pos
+
+                if fallback_gt and not detected:
+                    print("[WARNING] fixed_camera red-cube detection failed; fallback to gt object position.")
+
+            vision_err = torch.norm(estimated_object_pos[:, :2] - gt_object_pos_robot[:, :2], dim=1).mean().item()
+            if timestep % debug_interval == 0:
+                print(
+                    "[DEBUG] "
+                    f"step={timestep} "
+                    f"object_pose_source={args_cli.object_pose_source} "
+                    f"fixed_camera_detected={detected} "
+                    f"cube_pixel_center=({pixel_center[0]:.1f},{pixel_center[1]:.1f}) "
+                    f"cube_pixel_area={pixel_area} "
+                    f"estimated_object_position={estimated_object_pos[0].tolist()} "
+                    f"gt_object_position={gt_object_pos_robot[0].tolist()} "
+                    f"vision_error_xy={vision_err:.4f} "
+                    f"fallback_last_valid={fallback_last_valid} "
+                    f"fallback_gt={fallback_gt}"
+                )
             # agent stepping
             actions = policy(obs)
             # env stepping
