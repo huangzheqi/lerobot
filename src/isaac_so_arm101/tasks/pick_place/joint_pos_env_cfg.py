@@ -144,6 +144,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
         handeye_camera_pos = (0.051129, 0.109093, 0.078330)
         handeye_camera_rot = (0.571647, -0.416195, 0.505849, 0.490483)
+        # Keep exactly one production handeye camera to avoid debug camera clutter in Isaac Sim camera list.
 
         self.scene.fixed_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/fixed_camera",
