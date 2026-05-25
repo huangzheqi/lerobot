@@ -137,24 +137,13 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
     def __post_init__(self):
         super().__post_init__()
 
-        # Camera extrinsics for quick manual tuning:
+        # Camera extrinsics:
         # - fixed_camera: z controls camera height, x/y controls the table observation position, rot controls viewing direction.
-        # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
+        # - handeye_camera: pose is calibrated in Isaac Sim "Create from View" and set as wrist_link local offset.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.02, -0.20, 0.055)
-        # If the view is still too close to the robot body, try:
-        # handeye_camera_pos = (0.02, -0.24, 0.055)
-        # If tabletop is visible but gripper is missing, try:
-        # handeye_camera_pos = (0.02, -0.16, 0.055)
-        # hand-eye camera rotation presets (w, x, y, z) for quick manual switching:
-        # preset_a = (0.5, 0.5, -0.5, -0.5)
-        # preset_b = (0.5, -0.5, 0.5, -0.5)
-        # preset_c = (0.2706, -0.6533, 0.2706, -0.6533)
-        # preset_d = (0.6533, -0.2706, 0.6533, -0.2706)
-        handeye_camera_rot = (0.2706, 0.6533, -0.2706, -0.6533)
-        # If the view direction is reversed, try:
-        # handeye_camera_rot = (0.6533, 0.2706, -0.6533, -0.2706)
+        handeye_camera_pos = (0.051129, 0.109093, 0.078330)
+        handeye_camera_rot = (0.571647, -0.416195, 0.505849, 0.490483)
 
         self.scene.fixed_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/fixed_camera",
@@ -183,80 +172,5 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
             ),
-            offset=CameraCfg.OffsetCfg(pos=handeye_camera_pos, rot=handeye_camera_rot, convention="ros"),
-        )
-
-        self.scene.handeye_debug_a = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_a",
-            update_period=0.0,
-            height=128,
-            width=128,
-            data_types=["rgb"],
-            spawn=PinholeCameraCfg(
-                focal_length=6.0,
-                focus_distance=200.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.01, 100.0),
-            ),
-            offset=CameraCfg.OffsetCfg(pos=(0.06, -0.12, 0.04), rot=(0.5, 0.5, -0.5, -0.5), convention="ros"),
-        )
-
-        self.scene.handeye_debug_b = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_b",
-            update_period=0.0,
-            height=128,
-            width=128,
-            data_types=["rgb"],
-            spawn=PinholeCameraCfg(
-                focal_length=6.0,
-                focus_distance=200.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.01, 100.0),
-            ),
-            offset=CameraCfg.OffsetCfg(pos=(0.06, -0.12, 0.04), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
-        )
-
-        self.scene.handeye_debug_c = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_c",
-            update_period=0.0,
-            height=128,
-            width=128,
-            data_types=["rgb"],
-            spawn=PinholeCameraCfg(
-                focal_length=6.0,
-                focus_distance=200.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.01, 100.0),
-            ),
-            offset=CameraCfg.OffsetCfg(pos=(0.06, 0.12, 0.04), rot=(0.5, 0.5, -0.5, -0.5), convention="ros"),
-        )
-
-        self.scene.handeye_debug_d = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_d",
-            update_period=0.0,
-            height=128,
-            width=128,
-            data_types=["rgb"],
-            spawn=PinholeCameraCfg(
-                focal_length=6.0,
-                focus_distance=200.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.01, 100.0),
-            ),
-            offset=CameraCfg.OffsetCfg(pos=(0.06, 0.12, 0.04), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
-        )
-
-        self.scene.handeye_debug_e = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_debug_e",
-            update_period=0.0,
-            height=128,
-            width=128,
-            data_types=["rgb"],
-            spawn=PinholeCameraCfg(
-                focal_length=6.0,
-                focus_distance=200.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.01, 100.0),
-            ),
-            offset=CameraCfg.OffsetCfg(pos=(0.03, -0.16, 0.05), rot=(0.5, 0.5, -0.5, -0.5), convention="ros"),
+            offset=CameraCfg.OffsetCfg(pos=handeye_camera_pos, rot=handeye_camera_rot, convention="opengl"),
         )
