@@ -167,7 +167,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
             width=128,
             data_types=["rgb"],
             spawn=PinholeCameraCfg(
-                focal_length=15.0,
+                focal_length=18.0,
                 focus_distance=200.0,
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
