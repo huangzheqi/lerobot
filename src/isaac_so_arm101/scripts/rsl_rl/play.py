@@ -56,6 +56,23 @@ parser.add_argument(
     choices=["gt", "vision"],
     help="Source of object pose used in policy observation.",
 )
+parser.add_argument(
+    "--save_camera_debug",
+    action="store_true",
+    help="Save camera debug images when using vision-based object pose.",
+)
+parser.add_argument(
+    "--camera_debug_dir",
+    type=str,
+    default="logs/vision_debug",
+    help="Directory to save camera debug images.",
+)
+parser.add_argument(
+    "--camera_debug_interval",
+    type=int,
+    default=20,
+    help="Save camera debug images every N steps.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -80,6 +97,7 @@ import numpy as np
 import os
 import time
 import torch
+from PIL import Image, ImageDraw
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -237,6 +255,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     debug_interval = 50
     x_range = (-0.15, 0.20)
     y_range = (-0.30, 0.30)
+    camera_debug_dir = os.path.abspath(args_cli.camera_debug_dir)
+    if args_cli.save_camera_debug:
+        os.makedirs(camera_debug_dir, exist_ok=True)
+        print(f"[INFO] Camera debug images will be saved to: {camera_debug_dir}")
 
     def _extract_rgb_uint8(camera_rgb: torch.Tensor) -> np.ndarray:
         frame = camera_rgb[0, ..., :3].detach().cpu().numpy()
@@ -254,6 +276,56 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return False, (0.0, 0.0), area
         ys, xs = np.nonzero(red_mask)
         return True, (float(xs.mean()), float(ys.mean())), area
+
+    def _red_mask_u8(rgb: np.ndarray) -> np.ndarray:
+        r = rgb[..., 0].astype(np.int16)
+        g = rgb[..., 1].astype(np.int16)
+        b = rgb[..., 2].astype(np.int16)
+        red_mask = (r > 110) & (r > g + 35) & (r > b + 35)
+        return (red_mask.astype(np.uint8) * 255)
+
+    def _save_vision_debug_images(
+        step: int,
+        fixed_rgb: np.ndarray,
+        fixed_mask_u8: np.ndarray,
+        handeye_rgb: np.ndarray | None,
+        detected: bool,
+        pixel_center: tuple[float, float],
+        pixel_area: int,
+        est_pos_xyz: list[float],
+        gt_pos_xyz: list[float],
+        vision_err_xy: float,
+    ):
+        step_tag = f"{step:06d}"
+        Image.fromarray(fixed_rgb).save(os.path.join(camera_debug_dir, f"fixed_rgb_step_{step_tag}.png"))
+        Image.fromarray(fixed_mask_u8, mode="L").save(os.path.join(camera_debug_dir, f"fixed_mask_step_{step_tag}.png"))
+
+        overlay = Image.fromarray(fixed_rgb.copy())
+        draw = ImageDraw.Draw(overlay)
+        mask_pixels = np.argwhere(fixed_mask_u8 > 0)
+        if mask_pixels.shape[0] > 0:
+            y_min, x_min = mask_pixels.min(axis=0)
+            y_max, x_max = mask_pixels.max(axis=0)
+            draw.rectangle([(int(x_min), int(y_min)), (int(x_max), int(y_max))], outline=(255, 0, 0), width=2)
+        cx, cy = int(round(pixel_center[0])), int(round(pixel_center[1]))
+        draw.ellipse([(cx - 3, cy - 3), (cx + 3, cy + 3)], fill=(255, 255, 0), outline=(0, 0, 0), width=1)
+
+        text_lines = [
+            f"detected={detected}",
+            f"cube_pixel_center=({pixel_center[0]:.1f},{pixel_center[1]:.1f})",
+            f"cube_pixel_area={pixel_area}",
+            f"estimated_object_position={est_pos_xyz}",
+            f"gt_object_position={gt_pos_xyz}",
+            f"vision_error_xy={vision_err_xy:.4f}",
+        ]
+        text_y = 6
+        for line in text_lines:
+            draw.text((6, text_y), line, fill=(255, 255, 255))
+            text_y += 14
+        overlay.save(os.path.join(camera_debug_dir, f"fixed_overlay_step_{step_tag}.png"))
+
+        if handeye_rgb is not None:
+            Image.fromarray(handeye_rgb).save(os.path.join(camera_debug_dir, f"handeye_rgb_step_{step_tag}.png"))
 
     def _pixel_to_robot_xy(center_xy: tuple[float, float], width: int, height: int) -> tuple[float, float]:
         px, py = center_xy
@@ -281,14 +353,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             fallback_gt = False
 
             if args_cli.object_pose_source == "vision":
+                fixed_rgb = None
+                fixed_mask_u8 = None
+                handeye_rgb = None
                 if fixed_camera is None:
                     fallback_gt = True
                     print("[WARNING] object_pose_source=vision but fixed_camera is unavailable; fallback to gt.")
                 else:
-                    rgb = _extract_rgb_uint8(fixed_camera.data.output["rgb"])
-                    detected, pixel_center, pixel_area = _detect_red_cube(rgb)
+                    fixed_rgb = _extract_rgb_uint8(fixed_camera.data.output["rgb"])
+                    fixed_mask_u8 = _red_mask_u8(fixed_rgb)
+                    detected, pixel_center, pixel_area = _detect_red_cube(fixed_rgb)
                     if detected:
-                        est_x, est_y = _pixel_to_robot_xy(pixel_center, rgb.shape[1], rgb.shape[0])
+                        est_x, est_y = _pixel_to_robot_xy(pixel_center, fixed_rgb.shape[1], fixed_rgb.shape[0])
                         estimated_object_pos[:, 0] = est_x
                         estimated_object_pos[:, 1] = est_y
                         last_valid_object_pos = estimated_object_pos.clone()
@@ -301,6 +377,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                 if fallback_gt and not detected:
                     print("[WARNING] fixed_camera red-cube detection failed; fallback to gt object position.")
+
+                if args_cli.save_camera_debug and (timestep % max(1, args_cli.camera_debug_interval) == 0):
+                    if "handeye_camera" in base_env.scene.keys():
+                        handeye_rgb = _extract_rgb_uint8(base_env.scene["handeye_camera"].data.output["rgb"])
+                    if fixed_rgb is not None and fixed_mask_u8 is not None:
+                        _save_vision_debug_images(
+                            step=timestep,
+                            fixed_rgb=fixed_rgb,
+                            fixed_mask_u8=fixed_mask_u8,
+                            handeye_rgb=handeye_rgb,
+                            detected=detected,
+                            pixel_center=pixel_center,
+                            pixel_area=pixel_area,
+                            est_pos_xyz=estimated_object_pos[0].detach().cpu().tolist(),
+                            gt_pos_xyz=gt_object_pos_robot[0].detach().cpu().tolist(),
+                            vision_err_xy=torch.norm(
+                                estimated_object_pos[0, :2] - gt_object_pos_robot[0, :2], dim=0
+                            ).item(),
+                        )
 
             vision_err = torch.norm(estimated_object_pos[:, :2] - gt_object_pos_robot[:, :2], dim=1).mean().item()
             if timestep % debug_interval == 0:
@@ -321,8 +416,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy(obs)
             # env stepping
             obs, _, _, _ = env.step(actions)
+        timestep += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
