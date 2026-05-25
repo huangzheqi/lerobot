@@ -142,7 +142,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pose is calibrated in Isaac Sim "Create from View" and set as wrist_link local offset.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.051129, 0.145000, 0.078330)
+        handeye_camera_pos = (0.051129, 0.120000, 0.078330)
         handeye_camera_rot = (0.571647, -0.416195, 0.505849, 0.490483)
 
         self.scene.fixed_camera = CameraCfg(
@@ -167,7 +167,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
             width=128,
             data_types=["rgb"],
             spawn=PinholeCameraCfg(
-                focal_length=6.0,
+                focal_length=10.0,
                 focus_distance=200.0,
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
