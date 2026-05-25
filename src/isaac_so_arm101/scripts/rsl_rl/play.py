@@ -260,29 +260,65 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         os.makedirs(camera_debug_dir, exist_ok=True)
         print(f"[INFO] Camera debug images will be saved to: {camera_debug_dir}")
 
+    for manager_name in ("command_manager", "action_manager"):
+        manager = getattr(base_env, manager_name, None)
+        if manager is not None and hasattr(manager, "set_debug_vis"):
+            manager.set_debug_vis(False)
+            print(f"[INFO] Disabled {manager_name} debug visualization for cleaner camera images.")
+
     def _extract_rgb_uint8(camera_rgb: torch.Tensor) -> np.ndarray:
         frame = camera_rgb[0, ..., :3].detach().cpu().numpy()
         if frame.dtype != np.uint8:
             frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
         return frame
 
-    def _detect_red_cube(rgb: np.ndarray) -> tuple[bool, tuple[float, float], int]:
-        r = rgb[..., 0].astype(np.int16)
-        g = rgb[..., 1].astype(np.int16)
-        b = rgb[..., 2].astype(np.int16)
-        red_mask = (r > 110) & (r > g + 35) & (r > b + 35)
-        area = int(red_mask.sum())
-        if area <= 8:
-            return False, (0.0, 0.0), area
-        ys, xs = np.nonzero(red_mask)
-        return True, (float(xs.mean()), float(ys.mean())), area
+    min_cube_pixel_area = 50
 
-    def _red_mask_u8(rgb: np.ndarray) -> np.ndarray:
+    def _raw_red_mask(rgb: np.ndarray) -> np.ndarray:
         r = rgb[..., 0].astype(np.int16)
         g = rgb[..., 1].astype(np.int16)
         b = rgb[..., 2].astype(np.int16)
-        red_mask = (r > 110) & (r > g + 35) & (r > b + 35)
-        return (red_mask.astype(np.uint8) * 255)
+        return (r > 110) & (r > g + 35) & (r > b + 35)
+
+    def _largest_connected_component(mask: np.ndarray) -> np.ndarray:
+        height, width = mask.shape
+        visited = np.zeros_like(mask, dtype=bool)
+        best_component = np.zeros_like(mask, dtype=bool)
+        best_area = 0
+
+        for y in range(height):
+            for x in range(width):
+                if not mask[y, x] or visited[y, x]:
+                    continue
+                stack = [(y, x)]
+                visited[y, x] = True
+                component_pixels = []
+                while stack:
+                    cy, cx = stack.pop()
+                    component_pixels.append((cy, cx))
+                    for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                        if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+
+                if len(component_pixels) > best_area:
+                    best_area = len(component_pixels)
+                    best_component.fill(False)
+                    ys, xs = zip(*component_pixels)
+                    best_component[np.array(ys), np.array(xs)] = True
+
+        return best_component
+
+    def _detect_red_cube(rgb: np.ndarray) -> tuple[bool, tuple[float, float], int, np.ndarray]:
+        largest_component = _largest_connected_component(_raw_red_mask(rgb))
+        area = int(largest_component.sum())
+        if area < min_cube_pixel_area:
+            return False, (0.0, 0.0), area, largest_component
+        ys, xs = np.nonzero(largest_component)
+        return True, (float(xs.mean()), float(ys.mean())), area, largest_component
+
+    def _red_mask_u8(component_mask: np.ndarray) -> np.ndarray:
+        return (component_mask.astype(np.uint8) * 255)
 
     def _save_vision_debug_images(
         step: int,
@@ -299,6 +335,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         step_tag = f"{step:06d}"
         Image.fromarray(fixed_rgb).save(os.path.join(camera_debug_dir, f"fixed_rgb_step_{step_tag}.png"))
         Image.fromarray(fixed_mask_u8, mode="L").save(os.path.join(camera_debug_dir, f"fixed_mask_step_{step_tag}.png"))
+
+        Image.fromarray(fixed_rgb).resize((512, 512), Image.Resampling.NEAREST).save(
+            os.path.join(camera_debug_dir, f"fixed_rgb_step_{step_tag}_x4.png")
+        )
+        Image.fromarray(fixed_mask_u8, mode="L").resize((512, 512), Image.Resampling.NEAREST).save(
+            os.path.join(camera_debug_dir, f"fixed_mask_step_{step_tag}_x4.png")
+        )
 
         overlay = Image.fromarray(fixed_rgb.copy())
         draw = ImageDraw.Draw(overlay)
@@ -318,11 +361,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"gt_object_position={gt_pos_xyz}",
             f"vision_error_xy={vision_err_xy:.4f}",
         ]
-        text_y = 6
+        panel_width = 380
+        overlay_with_panel = Image.new("RGB", (overlay.width + panel_width, overlay.height), (0, 0, 0))
+        overlay_with_panel.paste(overlay, (0, 0))
+        panel_draw = ImageDraw.Draw(overlay_with_panel)
+        text_y = 8
         for line in text_lines:
-            draw.text((6, text_y), line, fill=(255, 255, 255))
-            text_y += 14
-        overlay.save(os.path.join(camera_debug_dir, f"fixed_overlay_step_{step_tag}.png"))
+            panel_draw.text((overlay.width + 8, text_y), line, fill=(255, 255, 255))
+            text_y += 16
+        overlay_with_panel.save(os.path.join(camera_debug_dir, f"fixed_overlay_step_{step_tag}.png"))
+        overlay_with_panel.resize((512 + panel_width, 512), Image.Resampling.NEAREST).save(
+            os.path.join(camera_debug_dir, f"fixed_overlay_step_{step_tag}_x4.png")
+        )
 
         if handeye_rgb is not None:
             Image.fromarray(handeye_rgb).save(os.path.join(camera_debug_dir, f"handeye_rgb_step_{step_tag}.png"))
@@ -361,8 +411,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     print("[WARNING] object_pose_source=vision but fixed_camera is unavailable; fallback to gt.")
                 else:
                     fixed_rgb = _extract_rgb_uint8(fixed_camera.data.output["rgb"])
-                    fixed_mask_u8 = _red_mask_u8(fixed_rgb)
-                    detected, pixel_center, pixel_area = _detect_red_cube(fixed_rgb)
+                    detected, pixel_center, pixel_area, component_mask = _detect_red_cube(fixed_rgb)
+                    fixed_mask_u8 = _red_mask_u8(component_mask)
                     if detected:
                         est_x, est_y = _pixel_to_robot_xy(pixel_center, fixed_rgb.shape[1], fixed_rgb.shape[0])
                         estimated_object_pos[:, 0] = est_x
@@ -371,12 +421,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     elif last_valid_object_pos is not None:
                         estimated_object_pos = last_valid_object_pos.clone()
                         fallback_last_valid = True
+                        print(f"[WARNING] fixed_camera red-cube detection failed (area={pixel_area}); fallback to last valid vision estimate.")
                     else:
                         fallback_gt = True
+                        print(
+                            "[WARNING] fixed_camera red-cube detection failed (area "
+                            f"{pixel_area} < {min_cube_pixel_area}) and no last valid estimate; fallback to gt object position."
+                        )
                 obs[:, object_slice[0]:object_slice[1]] = estimated_object_pos
-
-                if fallback_gt and not detected:
-                    print("[WARNING] fixed_camera red-cube detection failed; fallback to gt object position.")
 
                 if args_cli.save_camera_debug and (timestep % max(1, args_cli.camera_debug_interval) == 0):
                     if "handeye_camera" in base_env.scene.keys():
