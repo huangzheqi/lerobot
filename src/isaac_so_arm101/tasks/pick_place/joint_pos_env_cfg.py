@@ -142,19 +142,19 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
         # - handeye_camera: pos controls camera mount position relative to gripper, rot controls lens direction.
         fixed_camera_pos = (0.85, -0.90, 0.90)
         fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
-        handeye_camera_pos = (0.03, -0.16, 0.085)
-        # If it still appears below the gripper, try:
-        # handeye_camera_pos = (0.03, -0.16, 0.11)
+        handeye_camera_pos = (0.02, -0.20, 0.055)
+        # If the view is still too close to the robot body, try:
+        # handeye_camera_pos = (0.02, -0.24, 0.055)
         # If tabletop is visible but gripper is missing, try:
-        # handeye_camera_pos = (0.02, -0.12, 0.075)
+        # handeye_camera_pos = (0.02, -0.16, 0.055)
         # hand-eye camera rotation presets (w, x, y, z) for quick manual switching:
         # preset_a = (0.5, 0.5, -0.5, -0.5)
         # preset_b = (0.5, -0.5, 0.5, -0.5)
         # preset_c = (0.2706, -0.6533, 0.2706, -0.6533)
         # preset_d = (0.6533, -0.2706, 0.6533, -0.2706)
-        handeye_camera_rot = (0.6533, 0.2706, -0.6533, -0.2706)
+        handeye_camera_rot = (0.2706, 0.6533, -0.2706, -0.6533)
         # If the view direction is reversed, try:
-        # handeye_camera_rot = (0.2706, 0.6533, -0.2706, -0.6533)
+        # handeye_camera_rot = (0.6533, 0.2706, -0.6533, -0.2706)
 
         self.scene.fixed_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/fixed_camera",
@@ -178,7 +178,7 @@ class SoArm101PickPlaceCubeVisionEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg_PLAY):
             width=128,
             data_types=["rgb"],
             spawn=PinholeCameraCfg(
-                focal_length=6.0,
+                focal_length=8.0,
                 focus_distance=200.0,
                 horizontal_aperture=20.955,
                 clipping_range=(0.01, 100.0),
