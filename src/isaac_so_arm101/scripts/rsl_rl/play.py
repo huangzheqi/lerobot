@@ -53,8 +53,14 @@ parser.add_argument(
     "--object_pose_source",
     type=str,
     default="gt",
-    choices=["gt", "vision"],
+    choices=["gt", "vision", "resnet"],
     help="Source of object pose used in policy observation.",
+)
+parser.add_argument(
+    "--resnet_model_path",
+    type=str,
+    default="selected_models/resnet18_cube_pose.pt",
+    help="Path to trained ResNet18 cube pose model.",
 )
 parser.add_argument(
     "--save_camera_debug",
@@ -70,7 +76,7 @@ parser.add_argument(
 parser.add_argument(
     "--camera_debug_interval",
     type=int,
-    default=20,
+    default=100,
     help="Save camera debug images every N steps.",
 )
 # append RSL-RL cli arguments
@@ -98,6 +104,7 @@ import os
 import time
 import torch
 from PIL import Image, ImageDraw
+from isaac_so_arm101.scripts.rsl_rl.vision_pose_resnet import ResnetCubePoseEstimator
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -251,6 +258,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     object_asset = base_env.scene["object"]
     robot_asset = base_env.scene["robot"]
     fixed_camera = base_env.scene["fixed_camera"] if "Vision-Play" in task_name else None
+    resnet_estimator = None
+    if args_cli.object_pose_source == "resnet":
+        if fixed_camera is None:
+            print("[WARNING] object_pose_source=resnet but fixed_camera unavailable; fallback to gt.")
+        else:
+            try:
+                resnet_estimator = ResnetCubePoseEstimator(args_cli.resnet_model_path, device=env.unwrapped.device)
+                print(f"[INFO] Loaded ResNet18 cube pose model: {args_cli.resnet_model_path}")
+            except Exception as exc:
+                print(f"[WARNING] Failed loading ResNet18 model: {exc}; fallback to gt.")
     last_valid_object_pos = None
     debug_interval = 50
     x_range = (-0.15, 0.20)
@@ -448,6 +465,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 estimated_object_pos[0, :2] - gt_object_pos_robot[0, :2], dim=0
                             ).item(),
                         )
+            elif args_cli.object_pose_source == "resnet":
+                if fixed_camera is None or resnet_estimator is None:
+                    fallback_gt = True
+                else:
+                    try:
+                        est_pos = resnet_estimator.estimate(
+                            fixed_camera.data.output["rgb"],
+                            gt_object_pos_robot[:, 2],
+                        )
+                        estimated_object_pos = est_pos
+                        last_valid_object_pos = est_pos.clone()
+                    except Exception as exc:
+                        if last_valid_object_pos is not None:
+                            estimated_object_pos = last_valid_object_pos.clone()
+                            fallback_last_valid = True
+                            print(f"[WARNING] ResNet18 inference failed, fallback to last valid estimate: {exc}")
+                        else:
+                            fallback_gt = True
+                            print(f"[WARNING] ResNet18 inference failed, fallback to gt: {exc}")
+                obs[:, object_slice[0]:object_slice[1]] = estimated_object_pos
 
             vision_err = torch.norm(estimated_object_pos[:, :2] - gt_object_pos_robot[:, :2], dim=1).mean().item()
             if timestep % debug_interval == 0:
