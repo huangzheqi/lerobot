@@ -14,7 +14,6 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import isaac_so_arm101.scripts.rsl_rl.cli_args as cli_args # isort: skip
-from isaac_so_arm101.tasks.pick_place.robust_eval_cfg import apply_pick_place_disturbance # isort: skip
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -98,6 +97,10 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+# Import Isaac Lab task extensions only after SimulationApp is created.
+import isaac_so_arm101.tasks  # noqa: F401
+from isaac_so_arm101.tasks.pick_place.robust_eval_cfg import apply_pick_place_disturbance # isort: skip
+
 import gymnasium as gym
 import numpy as np
 import os
@@ -122,7 +125,6 @@ from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkp
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 
 import isaaclab_tasks  # noqa: F401
-import isaac_so_arm101.tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -479,7 +481,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 else:
                     try:
                         episode_steps = base_env.episode_length_buf.to(torch.int64)
-                        reset_env_mask = episode_steps < prev_episode_steps
+                        reset_env_mask = (
+                            (episode_steps <= 1)
+                            & (prev_episode_steps >= 2)
+                            & (episode_steps < prev_episode_steps)
+                        )
                         if torch.any(reset_env_mask):
                             resnet_sum_xy[reset_env_mask] = 0.0
                             resnet_count[reset_env_mask] = 0
@@ -518,6 +524,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             vision_err = torch.norm(estimated_object_pos[:, :2] - gt_object_pos_robot[:, :2], dim=1).mean().item()
             if timestep % debug_interval == 0:
+                episode_step_debug = int(base_env.episode_length_buf[0].item())
+                cache_reset_debug = False
+                resnet_count_debug = 0
                 raw_resnet_pos_debug = (
                     raw_resnet_object_pos[0].tolist()
                     if args_cli.object_pose_source == "resnet"
@@ -528,15 +537,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     if args_cli.object_pose_source == "resnet"
                     else [float("nan"), float("nan"), float("nan")]
                 )
+                if args_cli.object_pose_source == "resnet":
+                    cache_reset_debug = bool(reset_env_mask[0].item()) if "reset_env_mask" in locals() else False
+                    resnet_count_debug = int(resnet_count[0].item())
                 print(
                     "[DEBUG] "
                     f"step={timestep} "
+                    f"episode_step={episode_step_debug} "
+                    f"cache_reset={cache_reset_debug} "
                     f"object_pose_source={args_cli.object_pose_source} "
                     f"fixed_camera_detected={detected} "
                     f"cube_pixel_center=({pixel_center[0]:.1f},{pixel_center[1]:.1f}) "
                     f"cube_pixel_area={pixel_area} "
                     f"estimated_object_position={estimated_object_pos[0].tolist()} "
                     f"raw_resnet_object_position={raw_resnet_pos_debug} "
+                    f"resnet_count={resnet_count_debug} "
                     f"cached_resnet_object_position={cached_resnet_pos_debug} "
                     f"gt_object_position={gt_object_pos_robot[0].tolist()} "
                     f"vision_error_xy={vision_err:.4f} "
