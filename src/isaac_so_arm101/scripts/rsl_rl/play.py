@@ -403,6 +403,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         return est_x, est_y
 
     timestep = 0
+    num_envs = env.unwrapped.num_envs
+    resnet_warmup_steps = 10
+    resnet_fixed_z = 0.012
+    cached_resnet_object_pos = torch.zeros((num_envs, 3), device=env.unwrapped.device, dtype=torch.float32)
+    resnet_sum_xy = torch.zeros((num_envs, 2), device=env.unwrapped.device, dtype=torch.float32)
+    resnet_count = torch.zeros((num_envs,), device=env.unwrapped.device, dtype=torch.int64)
+    prev_episode_steps = torch.full((num_envs,), -1, device=env.unwrapped.device, dtype=torch.int64)
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -416,6 +423,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             pixel_center = (0.0, 0.0)
             pixel_area = 0
             estimated_object_pos = gt_object_pos_robot.clone()
+            raw_resnet_object_pos = torch.full_like(gt_object_pos_robot, float("nan"))
             fallback_last_valid = False
             fallback_gt = False
 
@@ -470,12 +478,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     fallback_gt = True
                 else:
                     try:
-                        est_pos = resnet_estimator.estimate(
-                            fixed_camera.data.output["rgb"],
-                            gt_object_pos_robot[:, 2],
-                        )
-                        estimated_object_pos = est_pos
-                        last_valid_object_pos = est_pos.clone()
+                        episode_steps = base_env.episode_length_buf.to(torch.int64)
+                        reset_env_mask = episode_steps < prev_episode_steps
+                        if torch.any(reset_env_mask):
+                            resnet_sum_xy[reset_env_mask] = 0.0
+                            resnet_count[reset_env_mask] = 0
+                            cached_resnet_object_pos[reset_env_mask] = 0.0
+                        prev_episode_steps = episode_steps.clone()
+
+                        est_pos = resnet_estimator.estimate(fixed_camera.data.output["rgb"], gt_object_pos_robot[:, 2])
+                        raw_resnet_object_pos = est_pos.clone()
+
+                        warmup_mask = episode_steps < resnet_warmup_steps
+                        if torch.any(warmup_mask):
+                            resnet_sum_xy[warmup_mask] += raw_resnet_object_pos[warmup_mask, :2]
+                            resnet_count[warmup_mask] += 1
+                            count_f = resnet_count[warmup_mask].unsqueeze(1).to(torch.float32)
+                            cached_resnet_object_pos[warmup_mask, :2] = resnet_sum_xy[warmup_mask] / count_f
+                            cached_resnet_object_pos[warmup_mask, 2] = resnet_fixed_z
+
+                        no_cache_mask = resnet_count == 0
+                        if torch.any(no_cache_mask):
+                            cached_resnet_object_pos[no_cache_mask, :2] = raw_resnet_object_pos[no_cache_mask, :2]
+                            cached_resnet_object_pos[no_cache_mask, 2] = resnet_fixed_z
+                            resnet_sum_xy[no_cache_mask] = raw_resnet_object_pos[no_cache_mask, :2]
+                            resnet_count[no_cache_mask] = 1
+
+                        estimated_object_pos = cached_resnet_object_pos.clone()
+                        last_valid_object_pos = estimated_object_pos.clone()
                     except Exception as exc:
                         if last_valid_object_pos is not None:
                             estimated_object_pos = last_valid_object_pos.clone()
@@ -488,6 +518,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             vision_err = torch.norm(estimated_object_pos[:, :2] - gt_object_pos_robot[:, :2], dim=1).mean().item()
             if timestep % debug_interval == 0:
+                raw_resnet_pos_debug = (
+                    raw_resnet_object_pos[0].tolist()
+                    if args_cli.object_pose_source == "resnet"
+                    else [float("nan"), float("nan"), float("nan")]
+                )
+                cached_resnet_pos_debug = (
+                    cached_resnet_object_pos[0].tolist()
+                    if args_cli.object_pose_source == "resnet"
+                    else [float("nan"), float("nan"), float("nan")]
+                )
                 print(
                     "[DEBUG] "
                     f"step={timestep} "
@@ -496,6 +536,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"cube_pixel_center=({pixel_center[0]:.1f},{pixel_center[1]:.1f}) "
                     f"cube_pixel_area={pixel_area} "
                     f"estimated_object_position={estimated_object_pos[0].tolist()} "
+                    f"raw_resnet_object_position={raw_resnet_pos_debug} "
+                    f"cached_resnet_object_position={cached_resnet_pos_debug} "
                     f"gt_object_position={gt_object_pos_robot[0].tolist()} "
                     f"vision_error_xy={vision_err:.4f} "
                     f"fallback_last_valid={fallback_last_valid} "
