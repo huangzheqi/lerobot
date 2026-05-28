@@ -78,6 +78,24 @@ parser.add_argument(
     default=100,
     help="Save camera debug images every N steps.",
 )
+parser.add_argument(
+    "--save_resnet_hard_samples",
+    action="store_true",
+    default=False,
+    help="Save hard samples when ResNet object-pose error is above threshold.",
+)
+parser.add_argument(
+    "--hard_sample_dir",
+    type=str,
+    default="data/cube_pose_hard_samples",
+    help="Directory to save ResNet hard samples.",
+)
+parser.add_argument(
+    "--hard_sample_error_threshold",
+    type=float,
+    default=0.08,
+    help="Save sample when vision_error_xy exceeds this threshold.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -246,7 +264,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     policy_group_name = "policy"
     obs_term_dims = base_env.observation_manager.group_obs_term_dim[policy_group_name]
-    obs_term_names = base_env.observation_manager.group_obs_term_names[policy_group_name]
+    obs_term_names = base_env.observation_manager.active_terms[policy_group_name]
     obs_offsets = {}
     start_idx = 0
     for term_name, term_dim in zip(obs_term_names, obs_term_dims):
@@ -278,6 +296,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.save_camera_debug:
         os.makedirs(camera_debug_dir, exist_ok=True)
         print(f"[INFO] Camera debug images will be saved to: {camera_debug_dir}")
+    hard_sample_dir = os.path.abspath(args_cli.hard_sample_dir)
+    save_resnet_hard_samples = args_cli.object_pose_source == "resnet" and args_cli.save_resnet_hard_samples
+    if save_resnet_hard_samples:
+        os.makedirs(hard_sample_dir, exist_ok=True)
+        print(f"[INFO] ResNet hard samples will be saved to: {hard_sample_dir}")
 
     for manager_name in ("command_manager", "action_manager"):
         manager = getattr(base_env, manager_name, None)
@@ -523,6 +546,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs[:, object_slice[0]:object_slice[1]] = estimated_object_pos
 
             vision_err = torch.norm(estimated_object_pos[:, :2] - gt_object_pos_robot[:, :2], dim=1).mean().item()
+
+            if save_resnet_hard_samples and fixed_camera is not None and resnet_estimator is not None:
+                episode_step_debug = int(base_env.episode_length_buf[0].item())
+                vision_error_xy_env0 = torch.norm(
+                    estimated_object_pos[0, :2] - gt_object_pos_robot[0, :2], dim=0
+                ).item()
+                if vision_error_xy_env0 > args_cli.hard_sample_error_threshold:
+                    fixed_rgb_np = _extract_rgb_uint8(fixed_camera.data.output["rgb"])
+                    handeye_rgb_np = None
+                    if "handeye_camera" in base_env.scene.keys():
+                        handeye_rgb_np = _extract_rgb_uint8(base_env.scene["handeye_camera"].data.output["rgb"])
+                    if handeye_rgb_np is None:
+                        handeye_rgb_np = np.zeros_like(fixed_rgb_np)
+
+                    hard_sample_filename = f"hard_sample_step_{timestep:06d}_error_{vision_error_xy_env0:.3f}.npz"
+                    hard_sample_path = os.path.join(hard_sample_dir, hard_sample_filename)
+                    np.savez_compressed(
+                        hard_sample_path,
+                        fixed_rgb=fixed_rgb_np,
+                        handeye_rgb=handeye_rgb_np,
+                        object_position=gt_object_pos_robot[0].detach().cpu().numpy().astype(np.float32),
+                        raw_resnet_object_position=raw_resnet_object_pos[0].detach().cpu().numpy().astype(np.float32),
+                        cached_resnet_object_position=estimated_object_pos[0].detach().cpu().numpy().astype(np.float32),
+                        vision_error_xy=np.array(vision_error_xy_env0, dtype=np.float32),
+                        step=np.array(timestep, dtype=np.int64),
+                        episode_step=np.array(episode_step_debug, dtype=np.int64),
+                    )
+
             if timestep % debug_interval == 0:
                 episode_step_debug = int(base_env.episode_length_buf[0].item())
                 cache_reset_debug = False
