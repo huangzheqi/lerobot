@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import csv
 import sys
 
 from isaaclab.app import AppLauncher
@@ -60,6 +61,19 @@ parser.add_argument(
     type=str,
     default="selected_models/resnet18_cube_pose.pt",
     help="Path to trained ResNet18 cube pose model.",
+)
+
+parser.add_argument(
+    "--save_gt_debug",
+    action="store_true",
+    default=False,
+    help="Save per-episode CSV diagnostics when object_pose_source=gt.",
+)
+parser.add_argument(
+    "--gt_debug_dir",
+    type=str,
+    default="logs/gt_debug",
+    help="Directory to save GT object-pose diagnostic CSV files.",
 )
 parser.add_argument(
     "--save_camera_debug",
@@ -264,7 +278,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     policy_group_name = "policy"
     obs_term_dims = base_env.observation_manager.group_obs_term_dim[policy_group_name]
-    obs_term_names = base_env.observation_manager.active_terms[policy_group_name]
+    if hasattr(base_env.observation_manager, "active_terms"):
+        obs_term_names = base_env.observation_manager.active_terms[policy_group_name]
+    elif hasattr(base_env.observation_manager, "_group_obs_term_names"):
+        obs_term_names = base_env.observation_manager._group_obs_term_names[policy_group_name]
+    else:
+        raise RuntimeError("Observation manager does not expose active_terms or _group_obs_term_names.")
     obs_offsets = {}
     start_idx = 0
     for term_name, term_dim in zip(obs_term_names, obs_term_dims):
@@ -435,6 +454,141 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     resnet_sum_xy = torch.zeros((num_envs, 2), device=env.unwrapped.device, dtype=torch.float32)
     resnet_count = torch.zeros((num_envs,), device=env.unwrapped.device, dtype=torch.int64)
     prev_episode_steps = torch.full((num_envs,), -1, device=env.unwrapped.device, dtype=torch.int64)
+
+    gt_debug_enabled = args_cli.save_gt_debug and args_cli.object_pose_source == "gt"
+    if args_cli.save_gt_debug and args_cli.object_pose_source != "gt":
+        print(
+            "[WARNING] --save_gt_debug only applies when object_pose_source=gt; "
+            f"current source is {args_cli.object_pose_source}, so GT debug CSV logging is disabled."
+        )
+    gt_debug_dir = os.path.abspath(args_cli.gt_debug_dir)
+    gt_debug_seed = int(env_cfg.seed if env_cfg.seed is not None else 0)
+    gt_episode_indices = [0 for _ in range(num_envs)]
+    gt_debug_files = [None for _ in range(num_envs)]
+    gt_debug_writers = [None for _ in range(num_envs)]
+    gt_debug_fieldnames = [
+        "seed",
+        "step",
+        "reward",
+        "object_position",
+        "ee_position",
+        "box_position",
+        "ee_obj_dist",
+        "obj_box_dist",
+        "gripper_open",
+        "gripper_action",
+        "action",
+        "success",
+        "done",
+    ]
+    if gt_debug_enabled:
+        os.makedirs(gt_debug_dir, exist_ok=True)
+        print(f"[INFO] GT debug CSV files will be saved to: {gt_debug_dir}")
+
+    def _format_debug_vector(values: torch.Tensor | np.ndarray | list[float]) -> str:
+        if isinstance(values, torch.Tensor):
+            values = values.detach().cpu().flatten().tolist()
+        elif isinstance(values, np.ndarray):
+            values = values.flatten().tolist()
+        return "[" + ", ".join(f"{float(value):.6f}" for value in values) + "]"
+
+    def _gt_debug_csv_path(env_id: int, episode_index: int) -> str:
+        seed_tag = f"{gt_debug_seed:03d}"
+        if env_id == 0 and episode_index == 0:
+            filename = f"gt_seed_{seed_tag}.csv"
+        else:
+            filename = f"gt_seed_{seed_tag}_env_{env_id:02d}_episode_{episode_index:03d}.csv"
+        return os.path.join(gt_debug_dir, filename)
+
+    def _open_gt_debug_csv(env_id: int) -> None:
+        episode_index = gt_episode_indices[env_id]
+        csv_path = _gt_debug_csv_path(env_id, episode_index)
+        gt_debug_files[env_id] = open(csv_path, "w", newline="")
+        gt_debug_writers[env_id] = csv.DictWriter(gt_debug_files[env_id], fieldnames=gt_debug_fieldnames)
+        gt_debug_writers[env_id].writeheader()
+        print(f"[INFO] Writing GT debug episode CSV: {csv_path}")
+
+    def _close_gt_debug_csv(env_id: int) -> None:
+        if gt_debug_files[env_id] is not None:
+            gt_debug_files[env_id].flush()
+            gt_debug_files[env_id].close()
+            gt_debug_files[env_id] = None
+            gt_debug_writers[env_id] = None
+
+    def _get_ee_position_robot_frame() -> torch.Tensor:
+        if "ee_frame" not in base_env.scene.keys():
+            return torch.full((num_envs, 3), float("nan"), device=env.unwrapped.device)
+        ee_frame = base_env.scene["ee_frame"]
+        return ee_frame.data.target_pos_w[..., 0, :3] - robot_asset.data.root_pos_w[:, :3]
+
+    def _get_box_position_robot_frame() -> torch.Tensor:
+        command_manager = getattr(base_env, "command_manager", None)
+        if command_manager is None:
+            return torch.full((num_envs, 3), float("nan"), device=env.unwrapped.device)
+        return command_manager.get_command("object_pose")[:, :3]
+
+    def _get_gripper_open_ratio() -> torch.Tensor:
+        try:
+            gripper_idx = robot_asset.find_joints("gripper")[0][0]
+            gripper_joint_pos = robot_asset.data.joint_pos[:, gripper_idx]
+            return torch.clamp((gripper_joint_pos - 0.12) / (0.45 - 0.12), min=0.0, max=1.0)
+        except Exception:
+            return torch.full((num_envs,), float("nan"), device=env.unwrapped.device)
+
+    def _collect_gt_debug_rows(actions: torch.Tensor) -> list[dict[str, object]]:
+        object_position = object_asset.data.root_pos_w[:, :3] - robot_asset.data.root_pos_w[:, :3]
+        ee_position = _get_ee_position_robot_frame()
+        box_position = _get_box_position_robot_frame()
+        ee_obj_dist = torch.norm(ee_position - object_position, dim=1)
+        obj_box_dist = torch.norm(object_position - box_position, dim=1)
+        gripper_open = _get_gripper_open_ratio()
+        gripper_action = actions[:, -1] if actions.ndim == 2 and actions.shape[1] > 0 else torch.full_like(gripper_open, float("nan"))
+        episode_steps = base_env.episode_length_buf.to(torch.int64) + 1
+        success = obj_box_dist < 0.05
+
+        rows = []
+        for env_id in range(num_envs):
+            rows.append(
+                {
+                    "seed": gt_debug_seed,
+                    "step": int(episode_steps[env_id].item()),
+                    "reward": float("nan"),
+                    "object_position": _format_debug_vector(object_position[env_id]),
+                    "ee_position": _format_debug_vector(ee_position[env_id]),
+                    "box_position": _format_debug_vector(box_position[env_id]),
+                    "ee_obj_dist": float(ee_obj_dist[env_id].item()),
+                    "obj_box_dist": float(obj_box_dist[env_id].item()),
+                    "gripper_open": float(gripper_open[env_id].item()),
+                    "gripper_action": float(gripper_action[env_id].item()),
+                    "action": _format_debug_vector(actions[env_id]),
+                    "success": bool(success[env_id].item()),
+                    "done": False,
+                }
+            )
+        return rows
+
+    def _write_gt_debug_rows(rows: list[dict[str, object]], rewards: torch.Tensor, dones: torch.Tensor) -> None:
+        rewards = rewards.detach().flatten()
+        dones = dones.detach().flatten().to(torch.bool)
+        for env_id, row in enumerate(rows):
+            if gt_debug_writers[env_id] is None:
+                _open_gt_debug_csv(env_id)
+            row["reward"] = float(rewards[env_id].item())
+            row["done"] = bool(dones[env_id].item())
+            gt_debug_writers[env_id].writerow(row)
+            if env_id == 0 and int(row["step"]) % 50 == 0:
+                print(
+                    f"seed={row['seed']} "
+                    f"step={row['step']} "
+                    f"reward={row['reward']:.4f} "
+                    f"ee_obj_dist={row['ee_obj_dist']:.4f} "
+                    f"obj_box_dist={row['obj_box_dist']:.4f} "
+                    f"gripper={row['gripper_open']:.4f}"
+                )
+            if dones[env_id]:
+                _close_gt_debug_csv(env_id)
+                gt_episode_indices[env_id] += 1
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -611,8 +765,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
             # agent stepping
             actions = policy(obs)
+            gt_debug_rows = _collect_gt_debug_rows(actions) if gt_debug_enabled else None
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            obs, rewards, dones, _ = env.step(actions)
+            if gt_debug_enabled:
+                _write_gt_debug_rows(gt_debug_rows, rewards, dones)
         timestep += 1
         if args_cli.video:
             # Exit the play loop after recording one video
@@ -623,6 +780,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if gt_debug_enabled:
+        for env_id in range(num_envs):
+            _close_gt_debug_csv(env_id)
 
     # close the simulator
     env.close()
