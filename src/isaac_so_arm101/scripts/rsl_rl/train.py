@@ -105,6 +105,23 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _log_gripper_action_definition(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    actions_cfg = getattr(env_cfg, "actions", None)
+    gripper_cfg = getattr(actions_cfg, "gripper_action", None)
+    if gripper_cfg is None:
+        return
+    open_expr = getattr(gripper_cfg, "open_command_expr", {})
+    close_expr = getattr(gripper_cfg, "close_command_expr", {})
+    open_value = open_expr.get("gripper", open_expr) if isinstance(open_expr, dict) else open_expr
+    close_value = close_expr.get("gripper", close_expr) if isinstance(close_expr, dict) else close_expr
+    print(
+        "[INFO] Gripper action definition: BinaryJointPositionAction uses positive policy action "
+        "for OPEN and non-positive policy action for CLOSE; "
+        f"gripper joint command {close_value}=CLOSED, {open_value}=OPEN. "
+        "GT debug gripper_open ratio is 0.0=CLOSED and 1.0=OPEN."
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -135,6 +152,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         seed = agent_cfg.seed + app_launcher.local_rank
         env_cfg.seed = seed
         agent_cfg.seed = seed
+
+    _log_gripper_action_definition(env_cfg)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

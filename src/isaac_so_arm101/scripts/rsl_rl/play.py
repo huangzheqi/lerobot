@@ -163,6 +163,23 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
+def _log_gripper_action_definition(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    actions_cfg = getattr(env_cfg, "actions", None)
+    gripper_cfg = getattr(actions_cfg, "gripper_action", None)
+    if gripper_cfg is None:
+        return
+    open_expr = getattr(gripper_cfg, "open_command_expr", {})
+    close_expr = getattr(gripper_cfg, "close_command_expr", {})
+    open_value = open_expr.get("gripper", open_expr) if isinstance(open_expr, dict) else open_expr
+    close_value = close_expr.get("gripper", close_expr) if isinstance(close_expr, dict) else close_expr
+    print(
+        "[INFO] Gripper action definition: BinaryJointPositionAction uses positive policy action "
+        "for OPEN and non-positive policy action for CLOSE; "
+        f"gripper joint command {close_value}=CLOSED, {open_value}=OPEN. "
+        "GT debug gripper_open ratio is 0.0=CLOSED and 1.0=OPEN."
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -178,6 +195,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    _log_gripper_action_definition(env_cfg)
 
     if args_cli.disturbance_type != "off" and args_cli.disturbance_level != "off":
         env_cfg = apply_pick_place_disturbance(
@@ -476,6 +495,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "ee_obj_dist",
         "obj_box_dist",
         "gripper_open",
+        "gripper_closed",
         "gripper_action",
         "action",
         "success",
@@ -542,6 +562,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         ee_obj_dist = torch.norm(ee_position - object_position, dim=1)
         obj_box_dist = torch.norm(object_position - box_position, dim=1)
         gripper_open = _get_gripper_open_ratio()
+        gripper_closed = 1.0 - gripper_open
         gripper_action = actions[:, -1] if actions.ndim == 2 and actions.shape[1] > 0 else torch.full_like(gripper_open, float("nan"))
         episode_steps = base_env.episode_length_buf.to(torch.int64) + 1
         success = obj_box_dist < 0.05
@@ -559,6 +580,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "ee_obj_dist": float(ee_obj_dist[env_id].item()),
                     "obj_box_dist": float(obj_box_dist[env_id].item()),
                     "gripper_open": float(gripper_open[env_id].item()),
+                    "gripper_closed": float(gripper_closed[env_id].item()),
                     "gripper_action": float(gripper_action[env_id].item()),
                     "action": _format_debug_vector(actions[env_id]),
                     "success": bool(success[env_id].item()),
@@ -583,7 +605,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"reward={row['reward']:.4f} "
                     f"ee_obj_dist={row['ee_obj_dist']:.4f} "
                     f"obj_box_dist={row['obj_box_dist']:.4f} "
-                    f"gripper={row['gripper_open']:.4f}"
+                    f"gripper_open={row['gripper_open']:.4f} "
+                    f"gripper_closed={row['gripper_closed']:.4f} "
+                    f"gripper_action={row['gripper_action']:.4f}"
                 )
             if dones[env_id]:
                 _close_gt_debug_csv(env_id)
