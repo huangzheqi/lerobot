@@ -23,6 +23,83 @@ def _goal_metrics(env: ManagerBasedRLEnv, command_name: str, robot_cfg: SceneEnt
     return xy_dist, z_err
 
 
+def _get_env_origins(env: ManagerBasedRLEnv, like: torch.Tensor) -> torch.Tensor:
+    origins = getattr(env.scene, "env_origins", None)
+    if origins is None:
+        return torch.zeros((like.shape[0], 3), device=like.device, dtype=like.dtype)
+    return origins.to(device=like.device, dtype=like.dtype)
+
+
+def _object_default_root_pos_w(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg,
+    initial_object_pos: tuple[float, float, float] = (0.2, 0.0, 0.015),
+) -> torch.Tensor:
+    """Return the per-env object reset/default world position when available."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    root_pos = obj.data.root_pos_w[:, :3]
+    default_root_state = getattr(obj.data, "default_root_state", None)
+    if default_root_state is not None:
+        default_pos = default_root_state[:, :3].to(device=root_pos.device, dtype=root_pos.dtype)
+        # Isaac Lab default root states are typically stored in env-local coordinates.
+        # Convert to world coordinates if they are not already offset by env origins.
+        env_origins = _get_env_origins(env, root_pos)
+        default_pos_with_origins = default_pos + env_origins
+        current_env_dist = torch.norm(root_pos[:, :2] - default_pos[:, :2], dim=1).mean()
+        current_world_dist = torch.norm(root_pos[:, :2] - default_pos_with_origins[:, :2], dim=1).mean()
+        return torch.where(
+            (current_env_dist < current_world_dist).view(1, 1),
+            default_pos,
+            default_pos_with_origins,
+        )
+
+    env_origins = _get_env_origins(env, root_pos)
+    initial_pos = torch.tensor(initial_object_pos, device=root_pos.device, dtype=root_pos.dtype).view(1, 3)
+    return initial_pos + env_origins
+
+
+def _object_episode_initial_root_pos_w(env: ManagerBasedRLEnv, object_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Cache the object's actual per-episode reset position for height gain and push diagnostics."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    root_pos = obj.data.root_pos_w[:, :3]
+    cache_name = "_so101_pick_place_initial_object_pos_w"
+    cached_pos = getattr(env, cache_name, None)
+    if cached_pos is None or cached_pos.shape != root_pos.shape or cached_pos.device != root_pos.device:
+        cached_pos = _object_default_root_pos_w(env, object_cfg).clone()
+
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is None:
+        reset_mask = torch.zeros((root_pos.shape[0], 1), device=root_pos.device, dtype=torch.bool)
+    else:
+        reset_mask = (episode_length_buf.to(device=root_pos.device) <= 1).view(-1, 1)
+    cached_pos = torch.where(reset_mask, root_pos.detach(), cached_pos.to(device=root_pos.device, dtype=root_pos.dtype))
+    setattr(env, cache_name, cached_pos)
+    return cached_pos
+
+
+def _object_height_gain(
+    env: ManagerBasedRLEnv,
+    initial_object_z: float,
+    object_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    obj: RigidObject = env.scene[object_cfg.name]
+    initial_pos_w = _object_episode_initial_root_pos_w(env, object_cfg)
+    fallback_initial_z = _object_default_root_pos_w(env, object_cfg, (0.2, 0.0, initial_object_z))[:, 2]
+    initial_z = torch.where(torch.isfinite(initial_pos_w[:, 2]), initial_pos_w[:, 2], fallback_initial_z)
+    return obj.data.root_pos_w[:, 2] - initial_z
+
+
+def _ee_object_distance(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg,
+    ee_frame_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_w = ee_frame.data.target_pos_w[..., 0, :3]
+    return torch.norm(obj.data.root_pos_w[:, :3] - ee_w, dim=1)
+
+
 def _get_gripper_joint_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
     robot: Articulation = env.scene[robot_cfg.name]
     gripper_idx = robot.find_joints("gripper")[0][0]
@@ -72,6 +149,86 @@ def _gates(env: ManagerBasedRLEnv, lift_height: float, near_goal_xy: float, rele
     s3 = (is_lifted & near_goal & ~low_height).float()
     s4 = (is_lifted & near_goal & low_height).float()
     return s1, s2, s3, s4
+
+
+def stage1_close_when_near_object_reward(
+    env: ManagerBasedRLEnv,
+    near_distance: float,
+    open_joint_pos: float,
+    close_joint_pos: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward closing the gripper only after the end-effector reaches the object."""
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < near_distance).float()
+    gripper_closed = 1.0 - _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
+    return near_object * gripper_closed
+
+
+def stage1_open_when_near_object_penalty(
+    env: ManagerBasedRLEnv,
+    near_distance: float,
+    open_joint_pos: float,
+    close_joint_pos: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Penalize staying open at grasp distance, which usually leads to pushing."""
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < near_distance).float()
+    gripper_open = _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
+    return near_object * gripper_open
+
+
+def object_lifted_from_initial_reward(
+    env: ManagerBasedRLEnv,
+    min_height_gain: float,
+    initial_object_z: float = 0.015,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Reward true lift based on height gain relative to the reset/default object height."""
+    height_gain = _object_height_gain(env, initial_object_z, object_cfg)
+    return (height_gain > min_height_gain).float()
+
+
+def lifted_close_hold_reward(
+    env: ManagerBasedRLEnv,
+    min_height_gain: float,
+    near_distance: float,
+    open_joint_pos: float,
+    close_joint_pos: float,
+    initial_object_z: float = 0.015,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward maintaining a close, closed grasp after the cube leaves the table."""
+    height_gain = _object_height_gain(env, initial_object_z, object_cfg)
+    lifted = (height_gain > min_height_gain).float()
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < near_distance).float()
+    gripper_closed = 1.0 - _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
+    return lifted * near_object * gripper_closed
+
+
+def push_without_lift_penalty(
+    env: ManagerBasedRLEnv,
+    move_xy_threshold: float,
+    min_height_gain: float,
+    initial_object_z: float = 0.015,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Penalize large horizontal cube displacement when the cube has not been lifted."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    initial_pos_w = _object_episode_initial_root_pos_w(env, object_cfg)
+    move_xy = torch.norm(obj.data.root_pos_w[:, :2] - initial_pos_w[:, :2], dim=1)
+    height_gain = obj.data.root_pos_w[:, 2] - initial_pos_w[:, 2]
+    pushed = move_xy > move_xy_threshold
+    not_lifted = height_gain < min_height_gain
+    return (pushed & not_lifted).float()
 
 
 def stage2_goal_xy_tracking_gated(env: ManagerBasedRLEnv, std: float, lift_height: float, near_goal_xy: float,
