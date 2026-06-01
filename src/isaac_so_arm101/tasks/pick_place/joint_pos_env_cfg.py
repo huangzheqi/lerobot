@@ -15,6 +15,31 @@ class SoArm101PickPlaceCubeEnvCfg(SoArm101LiftCubeEnvCfg):
         self.rewards.reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.2)
         self.rewards.lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.025}, weight=5.5)
 
+        grasp_params = {
+            "near_distance": 0.03,
+            "open_joint_pos": 0.45,
+            "close_joint_pos": 0.12,
+            "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+        }
+        lift_params = {"initial_object_z": 0.015, "min_height_gain": 0.02}
+        self.rewards.stage1_close_when_near_object_reward = RewTerm(
+            func=mdp.stage1_close_when_near_object_reward, params=grasp_params, weight=9.0
+        )
+        self.rewards.stage1_open_when_near_object_penalty = RewTerm(
+            func=mdp.stage1_open_when_near_object_penalty, params=grasp_params, weight=-7.0
+        )
+        self.rewards.object_lifted_from_initial_reward = RewTerm(
+            func=mdp.object_lifted_from_initial_reward, params=lift_params, weight=12.0
+        )
+        self.rewards.lifted_close_hold_reward = RewTerm(
+            func=mdp.lifted_close_hold_reward, params={**grasp_params, **lift_params, "near_distance": 0.04}, weight=10.0
+        )
+        self.rewards.push_without_lift_penalty = RewTerm(
+            func=mdp.push_without_lift_penalty,
+            params={**lift_params, "move_xy_threshold": 0.04},
+            weight=-8.0,
+        )
+
         gate_params = {
             "command_name": "object_pose",
             "lift_height": 0.045,
