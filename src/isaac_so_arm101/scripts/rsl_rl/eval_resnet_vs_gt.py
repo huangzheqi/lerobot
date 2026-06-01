@@ -3,11 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Evaluate GT-vs-ResNet object-pose policies on Vision-Play pick-place tasks.
+"""Evaluate one object-pose source on Vision-Play pick-place tasks.
 
-The script runs one episode per seed for both object pose sources:
-``gt`` and ``resnet``. It writes per-episode success and vision-error
-statistics to a CSV file for quantitative comparison.
+Run this script once with ``--object_pose_source gt`` and once with
+``--object_pose_source resnet`` when comparing modes. Keeping each Isaac Sim
+process scoped to a single source avoids repeatedly creating and closing GT and
+ResNet camera environments in the same process.
 """
 
 from __future__ import annotations
@@ -38,6 +39,13 @@ parser.add_argument(
     type=str,
     default="selected_models/resnet18_cube_pose.pt",
     help="Path to trained ResNet18 cube pose model.",
+)
+parser.add_argument(
+    "--object_pose_source",
+    type=str,
+    choices=["gt", "resnet"],
+    required=True,
+    help="Object-pose source to evaluate in this process. Run gt and resnet in separate invocations.",
 )
 parser.add_argument("--num_seeds", type=int, default=20, help="Number of consecutive seeds to evaluate.")
 parser.add_argument("--seed_start", type=int, default=1, help="First seed to evaluate.")
@@ -80,6 +88,7 @@ simulation_app = app_launcher.app
 import isaac_so_arm101.tasks  # noqa: F401,E402
 from isaac_so_arm101.tasks.pick_place.robust_eval_cfg import apply_pick_place_disturbance  # noqa: F401,E402
 
+import isaaclab_tasks  # noqa: F401,E402
 import gymnasium as gym  # noqa: E402
 import torch  # noqa: E402
 from isaac_so_arm101.scripts.rsl_rl.vision_pose_resnet import ResnetCubePoseEstimator  # noqa: E402
@@ -94,12 +103,7 @@ from isaaclab.envs import (  # noqa: E402
 )
 from isaaclab.utils.assets import retrieve_file_path  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper  # noqa: E402
-
-import isaaclab_tasks  # noqa: F401,E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
-
-
-OBJECT_POSE_SOURCES = ("gt", "resnet")
 
 
 @dataclass
@@ -450,7 +454,7 @@ def _stats_to_row(stats: EpisodeStats) -> dict[str, Any]:
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
-    """Run GT and ResNet evaluation episodes and write a CSV report."""
+    """Run evaluation episodes for exactly one object-pose source and write a CSV report."""
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -474,51 +478,54 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "fallback_gt",
     ]
 
+    output_csv_exists = os.path.exists(args_cli.output_csv)
+    output_csv_has_rows = output_csv_exists and os.path.getsize(args_cli.output_csv) > 0
     num_rows = 0
-    with open(args_cli.output_csv, "w", newline="", encoding="utf-8") as fp:
+    object_pose_source = args_cli.object_pose_source
+    with open(args_cli.output_csv, "a", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
-        writer.writeheader()
-        fp.flush()
+        if not output_csv_has_rows:
+            writer.writeheader()
+            fp.flush()
 
         for seed in range(args_cli.seed_start, args_cli.seed_start + args_cli.num_seeds):
-            for object_pose_source in OBJECT_POSE_SOURCES:
-                env_cfg.seed = seed
-                agent_cfg.seed = seed
-                print(f"[INFO] Evaluating seed={seed}, object_pose_source={object_pose_source}")
-                env = gym.make(args_cli.task, cfg=env_cfg)
-                try:
-                    if isinstance(env.unwrapped, DirectMARLEnv):
-                        env = multi_agent_to_single_agent(env)
-                    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+            env_cfg.seed = seed
+            agent_cfg.seed = seed
+            print(f"[INFO] Evaluating seed={seed}, object_pose_source={object_pose_source}")
+            env = gym.make(args_cli.task, cfg=env_cfg)
+            try:
+                if isinstance(env.unwrapped, DirectMARLEnv):
+                    env = multi_agent_to_single_agent(env)
+                env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-                    runner = _build_runner(env, agent_cfg, resume_path)
-                    policy = runner.get_inference_policy(device=env.unwrapped.device)
+                runner = _build_runner(env, agent_cfg, resume_path)
+                policy = runner.get_inference_policy(device=env.unwrapped.device)
 
-                    resnet_estimator = None
-                    if object_pose_source == "resnet":
-                        try:
-                            resnet_estimator = ResnetCubePoseEstimator(
-                                args_cli.resnet_model_path, device=env.unwrapped.device
-                            )
-                            print(f"[INFO] Loaded ResNet18 cube pose model: {args_cli.resnet_model_path}")
-                        except Exception as exc:
-                            print(f"[WARNING] Failed loading ResNet18 model: {exc}; fallback to gt.")
+                resnet_estimator = None
+                if object_pose_source == "resnet":
+                    try:
+                        resnet_estimator = ResnetCubePoseEstimator(
+                            args_cli.resnet_model_path, device=env.unwrapped.device
+                        )
+                        print(f"[INFO] Loaded ResNet18 cube pose model: {args_cli.resnet_model_path}")
+                    except Exception as exc:
+                        print(f"[WARNING] Failed loading ResNet18 model: {exc}; fallback to gt.")
 
-                    stats = _run_one_episode(
-                        env=env,
-                        policy=policy,
-                        object_pose_source=object_pose_source,
-                        resnet_estimator=resnet_estimator,
-                        seed=seed,
-                        max_episode_steps=args_cli.max_episode_steps,
-                    )
-                    writer.writerow(_stats_to_row(stats))
-                    fp.flush()
-                    num_rows += 1
-                finally:
-                    env.close()
+                stats = _run_one_episode(
+                    env=env,
+                    policy=policy,
+                    object_pose_source=object_pose_source,
+                    resnet_estimator=resnet_estimator,
+                    seed=seed,
+                    max_episode_steps=args_cli.max_episode_steps,
+                )
+                writer.writerow(_stats_to_row(stats))
+                fp.flush()
+                num_rows += 1
+            finally:
+                env.close()
 
-    print(f"[INFO] Wrote {num_rows} evaluation rows to: {args_cli.output_csv}")
+    print(f"[INFO] Appended {num_rows} {object_pose_source} evaluation rows to: {args_cli.output_csv}")
 
 
 if __name__ == "__main__":
