@@ -54,13 +54,22 @@ parser.add_argument(
     help="Name of the RL agent configuration entry point.",
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments. Evaluation expects 1.")
+parser.add_argument(
+    "--max_episode_steps",
+    type=int,
+    default=300,
+    help="Hard maximum number of steps per evaluation episode.",
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(headless=True)
 args_cli, hydra_args = parser.parse_known_args()
 args_cli.num_envs = 1
+args_cli.enable_cameras = True
 if args_cli.checkpoint is None:
     parser.error("--checkpoint is required for evaluation.")
+if args_cli.max_episode_steps < 1:
+    parser.error("--max_episode_steps must be >= 1.")
 
 sys.argv = [sys.argv[0]] + hydra_args
 
@@ -151,14 +160,37 @@ def _first_env_float(value: Any) -> float:
     return float(value)
 
 
+def _or_done_flags(terminated: Any, truncated: Any) -> Any:
+    """Combine terminated/truncated flags while preserving common vector formats."""
+    if torch.is_tensor(terminated) or torch.is_tensor(truncated):
+        ref = terminated if torch.is_tensor(terminated) else truncated
+        terminated_tensor = torch.as_tensor(terminated, device=ref.device, dtype=torch.bool)
+        truncated_tensor = torch.as_tensor(truncated, device=ref.device, dtype=torch.bool)
+        return torch.logical_or(terminated_tensor, truncated_tensor)
+    try:
+        return terminated | truncated
+    except TypeError:
+        if isinstance(terminated, (list, tuple)) and isinstance(truncated, (list, tuple)):
+            return [bool(term) or bool(trunc) for term, trunc in zip(terminated, truncated)]
+        return bool(terminated) or bool(truncated)
+
+
 def _step_env(env: RslRlVecEnvWrapper, actions: torch.Tensor):
-    """Step env and normalize 4-/5-tuple Gymnasium API variants."""
+    """Step env and normalize common Gymnasium/Isaac Lab API variants."""
     step_out = env.step(actions)
+    if not isinstance(step_out, tuple):
+        raise RuntimeError(f"Unexpected env.step output type: {type(step_out).__name__}")
+
     if len(step_out) == 5:
         obs, reward, terminated, truncated, extras = step_out
-        done = torch.logical_or(terminated, truncated)
+        done = _or_done_flags(terminated, truncated)
     elif len(step_out) == 4:
         obs, reward, done, extras = step_out
+    elif len(step_out) > 5:
+        obs, reward = step_out[0], step_out[1]
+        terminated, truncated = step_out[2], step_out[3]
+        extras = step_out[-1]
+        done = _or_done_flags(terminated, truncated)
     else:
         raise RuntimeError(f"Unexpected env.step output length: {len(step_out)}")
     return obs, reward, done, extras
@@ -329,6 +361,7 @@ def _run_one_episode(
     object_pose_source: str,
     resnet_estimator: ResnetCubePoseEstimator | None,
     seed: int,
+    max_episode_steps: int,
 ) -> EpisodeStats:
     """Run one evaluation episode and collect metrics."""
     base_env = env.unwrapped
@@ -343,6 +376,8 @@ def _run_one_episode(
     obs = _reset_env(env)
     cache_state = _init_resnet_cache(env.unwrapped.num_envs, env.unwrapped.device) if object_pose_source == "resnet" else None
     stats = EpisodeStats(seed=seed, object_pose_source=object_pose_source)
+
+    ended_by_max_episode_steps = False
 
     while simulation_app.is_running():
         with torch.inference_mode():
@@ -376,8 +411,21 @@ def _run_one_episode(
             stats.first_cached_resnet_object_position = cache_state.first_cached_object_position
             stats.fallback_gt = cache_state.fallback_gt_triggered
 
+        if stats.episode_length % 50 == 0:
+            print(
+                f"seed={seed} source={object_pose_source} step={stats.episode_length} "
+                f"reward={stats.final_reward:.6f} vision_error_xy={stats.vision_errors_xy[-1]:.6f}"
+            )
+
         if _first_env_bool(done):
             break
+        if stats.episode_length >= max_episode_steps:
+            ended_by_max_episode_steps = True
+            stats.success = False
+            break
+
+    if ended_by_max_episode_steps:
+        stats.success = False
 
     return stats
 
@@ -426,44 +474,51 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "fallback_gt",
     ]
 
-    rows = []
-    for seed in range(args_cli.seed_start, args_cli.seed_start + args_cli.num_seeds):
-        for object_pose_source in OBJECT_POSE_SOURCES:
-            env_cfg.seed = seed
-            agent_cfg.seed = seed
-            print(f"[INFO] Evaluating seed={seed}, object_pose_source={object_pose_source}")
-            env = gym.make(args_cli.task, cfg=env_cfg)
-            if isinstance(env.unwrapped, DirectMARLEnv):
-                env = multi_agent_to_single_agent(env)
-            env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-            runner = _build_runner(env, agent_cfg, resume_path)
-            policy = runner.get_inference_policy(device=env.unwrapped.device)
-
-            resnet_estimator = None
-            if object_pose_source == "resnet":
-                try:
-                    resnet_estimator = ResnetCubePoseEstimator(args_cli.resnet_model_path, device=env.unwrapped.device)
-                    print(f"[INFO] Loaded ResNet18 cube pose model: {args_cli.resnet_model_path}")
-                except Exception as exc:
-                    print(f"[WARNING] Failed loading ResNet18 model: {exc}; fallback to gt.")
-
-            stats = _run_one_episode(
-                env=env,
-                policy=policy,
-                object_pose_source=object_pose_source,
-                resnet_estimator=resnet_estimator,
-                seed=seed,
-            )
-            rows.append(_stats_to_row(stats))
-            env.close()
-
+    num_rows = 0
     with open(args_cli.output_csv, "w", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        fp.flush()
 
-    print(f"[INFO] Wrote {len(rows)} evaluation rows to: {args_cli.output_csv}")
+        for seed in range(args_cli.seed_start, args_cli.seed_start + args_cli.num_seeds):
+            for object_pose_source in OBJECT_POSE_SOURCES:
+                env_cfg.seed = seed
+                agent_cfg.seed = seed
+                print(f"[INFO] Evaluating seed={seed}, object_pose_source={object_pose_source}")
+                env = gym.make(args_cli.task, cfg=env_cfg)
+                try:
+                    if isinstance(env.unwrapped, DirectMARLEnv):
+                        env = multi_agent_to_single_agent(env)
+                    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+                    runner = _build_runner(env, agent_cfg, resume_path)
+                    policy = runner.get_inference_policy(device=env.unwrapped.device)
+
+                    resnet_estimator = None
+                    if object_pose_source == "resnet":
+                        try:
+                            resnet_estimator = ResnetCubePoseEstimator(
+                                args_cli.resnet_model_path, device=env.unwrapped.device
+                            )
+                            print(f"[INFO] Loaded ResNet18 cube pose model: {args_cli.resnet_model_path}")
+                        except Exception as exc:
+                            print(f"[WARNING] Failed loading ResNet18 model: {exc}; fallback to gt.")
+
+                    stats = _run_one_episode(
+                        env=env,
+                        policy=policy,
+                        object_pose_source=object_pose_source,
+                        resnet_estimator=resnet_estimator,
+                        seed=seed,
+                        max_episode_steps=args_cli.max_episode_steps,
+                    )
+                    writer.writerow(_stats_to_row(stats))
+                    fp.flush()
+                    num_rows += 1
+                finally:
+                    env.close()
+
+    print(f"[INFO] Wrote {num_rows} evaluation rows to: {args_cli.output_csv}")
 
 
 if __name__ == "__main__":
