@@ -30,4 +30,7 @@ echo "[4/4] Converting paper.md -> .docx ..."
 echo "[5/5] Fixing table column widths (fixed layout) ..."
 python3 fix_tables.py "机械臂强化学习论文_电子与信息学报.docx"
 
+echo "[6/6] Justifying body paragraphs ..."
+python3 set_justify.py "机械臂强化学习论文_电子与信息学报.docx" BodyText Compact FirstParagraph
+
 echo "Done -> 机械臂强化学习论文_电子与信息学报.docx"
