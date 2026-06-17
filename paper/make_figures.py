@@ -38,53 +38,59 @@ C = {"blue": "#1f77b4", "orange": "#ff7f0e", "green": "#2ca02c", "red": "#d62728
 # Figure 1: decoupled perception-control architecture (train vs inference)
 # ----------------------------------------------------------------------------
 def fig_architecture():
-    fig, ax = plt.subplots(figsize=(12, 6.2))
+    """Clean orthogonal (Manhattan) routing: arrows only run horizontally/vertically
+    and never cross a box."""
+    fig, ax = plt.subplots(figsize=(12.2, 6.4))
     ax.set_xlim(0, 100)
     ax.set_ylim(0, 52)
     ax.axis("off")
 
-    def box(x0, x1, y0, y1, text, fc, fs=9.5):
+    def box(x0, x1, y0, y1, text, fc, fs=9.0):
         ax.add_patch(FancyBboxPatch((x0, y0), x1 - x0, y1 - y0,
-                     boxstyle="round,pad=0.5,rounding_size=1.8",
-                     linewidth=1.3, edgecolor="#333333", facecolor=fc))
-        ax.text((x0 + x1) / 2, (y0 + y1) / 2, text, ha="center", va="center", fontsize=fs)
-        return ((x0 + x1) / 2, (y0 + y1) / 2, x0, x1, y0, y1)
+                     boxstyle="round,pad=0.4,rounding_size=1.6",
+                     linewidth=1.3, edgecolor="#333333", facecolor=fc, zorder=3))
+        ax.text((x0 + x1) / 2, (y0 + y1) / 2, text, ha="center", va="center",
+                fontsize=fs, zorder=4)
 
-    def arrow(p1, p2, text="", color="#333333", rad=0.0, ls="-", fs=8.6, off=(0, 0)):
-        ax.add_patch(FancyArrowPatch(p1, p2, arrowstyle="-|>", mutation_scale=14,
-                     linewidth=1.5, color=color, linestyle=ls,
-                     connectionstyle=f"arc3,rad={rad}"))
-        if text:
-            ax.text((p1[0] + p2[0]) / 2 + off[0], (p1[1] + p2[1]) / 2 + off[1], text,
-                    ha="center", va="center", fontsize=fs, color=color, style="italic")
+    def oarrow(pts, color="#333333", ls="-", lw=1.6):
+        pts = [(float(a), float(b)) for a, b in pts]
+        for i in range(len(pts) - 2):  # intermediate segments
+            ax.plot([pts[i][0], pts[i + 1][0]], [pts[i][1], pts[i + 1][1]],
+                    color=color, ls=ls, lw=lw, solid_capstyle="round", zorder=2)
+        ax.annotate("", xy=pts[-1], xytext=pts[-2],
+                    arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, linestyle=ls,
+                                    shrinkA=0, shrinkB=0, mutation_scale=14), zorder=2)
+
+    def lab(x, y, text, color="#333333", fs=8.6):
+        ax.text(x, y, text, ha="center", va="center", fontsize=fs, color=color, style="italic", zorder=4)
 
     blue, org, grn, pur, gray, red = "#cfe3f7", "#ffe6cc", "#d6efd6", "#ece1f5", "#eeeeee", "#fde2e1"
 
-    sim = box(3, 21, 33, 45, "Isaac Lab Simulation\nSO-ARM101 + Cube", blue)
-    obs = box(39, 60, 33, 45, "Observation $o_t$  (28-D)\n$q,\\dot q$, obj-pos, goal, $a_{t-1}$", org, 9.0)
-    pol = box(65, 83, 33, 45, "PPO Policy $\\pi_\\theta$\nActor-Critic\n256-128-64", pur)
-    act = box(86, 99, 33, 45, "Action\n5 joints\n+ gripper", org, 9.0)
+    # top lane (control / training data flow)
+    box(3, 21, 35, 47, "Isaac Lab Simulation\nSO-ARM101 + Cube", blue)
+    box(38, 59, 35, 47, "Observation $o_t$  (28-D)\n$q,\\dot q$, obj-pos, goal, $a_{t-1}$", org)
+    box(65, 83, 35, 47, "PPO Policy $\\pi_\\theta$\nActor-Critic\n256-128-64", pur)
+    box(87, 99, 35, 47, "Action\n5 joints\n+ gripper", org)
+    # perception lane (inference)
+    box(24, 42, 18, 30, "Fixed Camera\nRGB 128$\\times$128", grn)
+    box(49, 71, 18, 30, "Perception (infer)\nColor-mask  /  ResNet-18", grn)
+    # training-signal strip
+    box(3, 30, 2, 12, "Domain Randomization\n(friction/light/camera/clutter)", gray)
+    box(65, 96, 2, 12, "Four-Stage Gated Reward\n+ Latch (anti-cheat)", red)
 
-    cam = box(3, 21, 14, 26, "Fixed Camera\nRGB 128$\\times$128", grn)
-    per = box(30, 55, 14, 26, "Perception (infer)\nColor-mask  /  ResNet-18", grn, 9.0)
+    # --- orthogonal arrows (horizontal / vertical only) ---
+    oarrow([(21, 41), (38, 41)]); lab(29.5, 42.8, "GT state (train)")
+    oarrow([(59, 41), (65, 41)])
+    oarrow([(83, 41), (87, 41)]); lab(85, 42.8, "$a_t$")
+    oarrow([(42, 24), (49, 24)])
+    oarrow([(53, 30), (53, 35)], color=C["green"]); lab(61, 32.6, "object xy (infer)", color=C["green"])
+    # feedback Action -> Sim, routed cleanly above the top row
+    oarrow([(93, 47), (93, 49.5), (12, 49.5), (12, 47)], color=C["red"])
+    lab(52, 50.7, "joint command", color=C["red"])
+    # training / eval side signals (vertical, in clear channels)
+    oarrow([(78, 12), (78, 35)], color=C["red"], ls="--"); lab(88, 24, "reward (train)", color=C["red"])
+    oarrow([(12, 12), (12, 35)], color="#555555", ls="--"); lab(18, 24, "DR (eval)", color="#555555")
 
-    rew = box(60, 88, 2, 11, "Four-Stage Gated Reward\n+ Latch (anti-cheat)", red, 9.0)
-    dr = box(3, 42, 2, 11, "Domain Randomization\n(friction/light/camera/clutter)", gray, 9.0)
-
-    # control / train lane
-    arrow((21, 40), (39, 40), "GT state (train)", off=(0, 1.4))
-    arrow((60, 40), (65, 40))
-    arrow((83, 40), (86, 40), "$a_t$", off=(0, 1.4), fs=9)
-    arrow((92.5, 45), (12, 45.4), "joint command", color=C["red"], rad=-0.28, fs=8.6)
-    # perception lane
-    arrow((21, 20), (30, 20))
-    arrow((49, 26), (49, 33), "object-pos (infer)", color=C["green"], off=(7.5, 0), fs=8.4)
-    # training / eval signals
-    arrow((72, 11), (74, 33), "reward (train)", color=C["red"], ls="--", off=(7.5, -1), fs=8.4)
-    arrow((18, 11), (12, 33), "DR (eval)", color="#555555", ls="--", off=(-5.5, 0), fs=8.4)
-
-    ax.text(50, 50, "Decoupled Perception-Control Framework  (train: GT state · infer: vision)",
-            ha="center", va="center", fontsize=12, fontweight="bold")
     fig.savefig(os.path.join(OUT, "fig1_architecture.png"), bbox_inches="tight")
     plt.close(fig)
 

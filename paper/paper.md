@@ -159,23 +159,25 @@ $$ r_{\text{place}}=\mathbb{1}\big[d_{xy}<0.05\wedge|z_{\text{obj}}-0.025|<0.015
 : 表 1　课程式四阶段门控奖励的完整项与权重
 
 | 阶段 | 奖励/惩罚项 | 权重 $w_k$ | 作用 |
-|:--|:--|:--:|:--|
-| 一 | reaching_object | $+1.0$ | 末端接近物体 |
-| 一 | lifting_object | $+5.0$ | 抬离桌面 |
-| 二 | stage2_goal_xy_tracking | $+10.0$ | 举物向目标水平靠近 |
-| 二 | stage2_early_open_penalty | $-5.0$ | 防搬运途中早开 |
-| 三 | stage3_soft_descent | $+12.0$ | 柔和下降 |
-| 三 | stage3_hard_drop_penalty | $-8.0$ | 防硬性跌落 |
-| 三 | stage3_ee_low_near_goal | $+14.0$ | 末端降至目标低位 |
-| 三 | stage3_object_height_near_table | $+14.0$ | 物体降至近桌面 |
-| 三 | stage3_wrist_flex_release_pose | $+2.0$ | 手腕释放姿态 |
-| 四 | stage4_release_reward | $+12.0$ | 释放位张爪 |
-| 四 | stage4_hold_too_long_penalty | $-10.0$ | 防该放却不放 |
-| 四 | stage4_gripper_open_near_table | $+11.0$ | 低位近目标张爪 |
-| 四 | stage4_stable_placed_reward | $+16.0$ | 稳定放置（终点信号） |
-| 四 | stage4_ee_away_after_place | $+2.0$ | 放后撤手 |
-| 全程 | action_rate | $-0.1$ | 动作平滑 |
-| 全程 | joint_vel | $-0.1$ | 抑制关节乱晃 |
+|:--:|:--|:--:|:--|
+| 一 | reaching object | $+1.0$ | 末端接近物体 |
+| 一 | lifting object | $+5.0$ | 抬离桌面 |
+| 二 | goal xy tracking | $+10.0$ | 举物向目标水平靠近 |
+| 二 | early open penalty | $-5.0$ | 防搬运途中早开 |
+| 三 | soft descent | $+12.0$ | 柔和下降 |
+| 三 | hard drop penalty | $-8.0$ | 防硬性跌落 |
+| 三 | ee low near goal | $+14.0$ | 末端降至目标低位 |
+| 三 | object height near table | $+14.0$ | 物体降至近桌面 |
+| 三 | wrist flex release pose | $+2.0$ | 手腕释放姿态 |
+| 四 | release reward | $+12.0$ | 释放位张爪 |
+| 四 | hold too long penalty | $-10.0$ | 防该放却不放 |
+| 四 | gripper open near table | $+11.0$ | 低位近目标张爪 |
+| 四 | stable placed reward | $+16.0$ | 稳定放置（终点信号） |
+| 四 | ee away after place | $+2.0$ | 放后撤手 |
+| 全程 | action rate | $-0.1$ | 动作平滑 |
+| 全程 | joint vel | $-0.1$ | 抑制关节乱晃 |
+
+注：分阶段项的代码函数名省略了 `stageN_` 前缀与下划线（如 `stage3_object_height_near_table`），权重与作用均与仓库代码一致。
 
 ## 5.3　设计原理分析
 

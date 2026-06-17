@@ -27,4 +27,7 @@ echo "[4/4] Converting paper.md -> .docx ..."
   -f markdown+tex_math_dollars+raw_attribute \
   -o "机械臂强化学习论文_电子与信息学报.docx"
 
+echo "[5/5] Fixing table column widths (fixed layout) ..."
+python3 fix_tables.py "机械臂强化学习论文_电子与信息学报.docx"
+
 echo "Done -> 机械臂强化学习论文_电子与信息学报.docx"
