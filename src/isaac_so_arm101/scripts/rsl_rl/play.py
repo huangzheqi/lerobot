@@ -76,6 +76,17 @@ parser.add_argument(
     help="Directory to save GT object-pose diagnostic CSV files.",
 )
 parser.add_argument(
+    "--gt_pose_noise_xy",
+    type=float,
+    default=0.0,
+    help=(
+        "Diagnostic only (object_pose_source=gt): inject a per-episode FIXED Gaussian XY offset "
+        "(std in metres) into the object position the policy observes, to measure how grasp "
+        "degrades vs pose error. Mimics a ResNet that freezes one biased estimate per episode. "
+        "0 = exact GT (default)."
+    ),
+)
+parser.add_argument(
     "--save_camera_debug",
     action="store_true",
     help="Save camera debug images when using vision-based object pose.",
@@ -116,8 +127,15 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-# always enable cameras to record video
-if args_cli.video:
+# Enable rendering whenever cameras will be spawned: for video recording, for the vision/resnet pose
+# sources (they read fixed_camera), or for any Vision-Play task (which spawns cameras regardless of
+# the pose source). Without --enable_cameras the env raises "A camera was spawned without the
+# --enable_cameras flag" at camera init.
+if (
+    args_cli.video
+    or args_cli.object_pose_source in ("vision", "resnet")
+    or (args_cli.task and "Vision" in args_cli.task)
+):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -328,8 +346,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[WARNING] Failed loading ResNet18 model: {exc}; fallback to gt.")
     last_valid_object_pos = None
     debug_interval = 50
-    x_range = (-0.15, 0.20)
-    y_range = (-0.30, 0.30)
+
+    # Analytic pixel->robot mapping for the colour-mask vision mode: known fixed-camera extrinsics
+    # and pinhole intrinsics, ray intersected with the cube-centre table plane. Replaces the old
+    # whole-image linear x_range/y_range interpolation, which ignored perspective (several cm of
+    # error across the oblique view). Camera params are read from the env cfg so cfg tweaks stay in
+    # sync. Sanity-checked offline: the optical axis lands at robot-frame (0.408, -0.015), centred
+    # in the cube workspace.
+    vision_cam_pos = np.array([0.85, -0.90, 0.90])
+    vision_cam_quat = (0.9009, 0.3898, 0.1213, 0.1472)  # (w,x,y,z), opengl convention
+    vision_cam_focal = 18.0
+    vision_cam_aperture = 20.955
+    fixed_cam_cfg = getattr(getattr(base_env.cfg, "scene", None), "fixed_camera", None)
+    if fixed_cam_cfg is not None:
+        vision_cam_pos = np.array(fixed_cam_cfg.offset.pos, dtype=np.float64)
+        vision_cam_quat = tuple(fixed_cam_cfg.offset.rot)
+        vision_cam_focal = float(fixed_cam_cfg.spawn.focal_length)
+        vision_cam_aperture = float(fixed_cam_cfg.spawn.horizontal_aperture)
+    _qw, _qx, _qy, _qz = vision_cam_quat
+    vision_cam_R = np.array([
+        [1 - 2 * (_qy * _qy + _qz * _qz), 2 * (_qx * _qy - _qw * _qz), 2 * (_qx * _qz + _qw * _qy)],
+        [2 * (_qx * _qy + _qw * _qz), 1 - 2 * (_qx * _qx + _qz * _qz), 2 * (_qy * _qz - _qw * _qx)],
+        [2 * (_qx * _qz - _qw * _qy), 2 * (_qy * _qz + _qw * _qx), 1 - 2 * (_qx * _qx + _qy * _qy)],
+    ])
+    vision_cube_plane_z = 0.015  # cube-centre height at rest (robot root frame)
     camera_debug_dir = os.path.abspath(args_cli.camera_debug_dir)
     if args_cli.save_camera_debug:
         os.makedirs(camera_debug_dir, exist_ok=True)
@@ -352,7 +392,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
         return frame
 
-    min_cube_pixel_area = 50
+    # The red recoloured cube spans only ~25-35 px in the 256x256 fixed view (~5-6 px across), so
+    # the old threshold of 50 would reject EVERY genuine detection and silently fall back to GT.
+    min_cube_pixel_area = 10
 
     def _raw_red_mask(rgb: np.ndarray) -> np.ndarray:
         r = rgb[..., 0].astype(np.int16)
@@ -457,28 +499,75 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if handeye_rgb is not None:
             Image.fromarray(handeye_rgb).save(os.path.join(camera_debug_dir, f"handeye_rgb_step_{step_tag}.png"))
 
-    def _pixel_to_robot_xy(center_xy: tuple[float, float], width: int, height: int) -> tuple[float, float]:
+    def _pixel_to_robot_xy(
+        center_xy: tuple[float, float], width: int, height: int, plane_z: float | None = None
+    ) -> tuple[float, float]:
+        # Pinhole back-projection: pixel -> OpenGL camera ray (+X right, +Y up, looking along -Z),
+        # rotate into the robot frame, intersect with the horizontal plane at the cube-centre height
+        # (defaults to the at-rest height; pass the live height while the cube is carried).
         px, py = center_xy
-        nx = px / max(width - 1, 1)
-        ny = py / max(height - 1, 1)
-        est_x = x_range[0] + nx * (x_range[1] - x_range[0])
-        est_y = y_range[1] - ny * (y_range[1] - y_range[0])
-        return est_x, est_y
+        fx = width * vision_cam_focal / vision_cam_aperture
+        cx_ = (width - 1) / 2.0
+        cy_ = (height - 1) / 2.0
+        d_cam = np.array([(px - cx_) / fx, -(py - cy_) / fx, -1.0])
+        d_robot = vision_cam_R @ d_cam
+        if abs(d_robot[2]) < 1e-6:
+            return float(vision_cam_pos[0]), float(vision_cam_pos[1])
+        z_plane = vision_cube_plane_z if plane_z is None else plane_z
+        t = (z_plane - vision_cam_pos[2]) / d_robot[2]
+        hit = vision_cam_pos + t * d_robot
+        return float(hit[0]), float(hit[1])
 
     timestep = 0
     num_envs = env.unwrapped.num_envs
-    resnet_warmup_steps = 10
+    # Skip the first few post-reset frames before trusting the ResNet estimate: the RTX render is not
+    # converged there and the estimate is far off (measured raw XY error ~14cm at step 0, ~10cm at
+    # step 1, settling to ~6cm by step ~5). The cube is static, so we average the estimate over the
+    # settled window [settle, warmup) and then freeze it (after that the reaching arm starts to
+    # occlude the cube). Averaging the bad early frames was the bug behind the cached 12.5cm error.
+    resnet_settle_steps = 5
+    resnet_warmup_steps = 12
     resnet_fixed_z = 0.012
     cached_resnet_object_pos = torch.zeros((num_envs, 3), device=env.unwrapped.device, dtype=torch.float32)
     resnet_sum_xy = torch.zeros((num_envs, 2), device=env.unwrapped.device, dtype=torch.float32)
     resnet_count = torch.zeros((num_envs,), device=env.unwrapped.device, dtype=torch.int64)
     prev_episode_steps = torch.full((num_envs,), -1, device=env.unwrapped.device, dtype=torch.int64)
 
-    gt_debug_enabled = args_cli.save_gt_debug and args_cli.object_pose_source == "gt"
+    # Diagnostic GT-noise state: one fixed XY offset per env, resampled at each episode reset.
+    gt_noise_xy = torch.zeros((num_envs, 2), device=env.unwrapped.device, dtype=torch.float32)
+    gt_noise_prev_steps = torch.full((num_envs,), -1, device=env.unwrapped.device, dtype=torch.int64)
+
+    # Colour-mask vision: LIVE tracking every step (median-of-3 smoothed). A freeze-after-settle
+    # design was tried first and produced only 8.9% grasp (45 episodes) despite a ~4mm-accurate
+    # initial estimate: the EE arrived on target (closest-approach offset median 2.1cm, unbiased)
+    # but v9's closing fingers NUDGE the cube 2-6cm (31/42 failures pushed >2cm, median 3.0cm) and
+    # the frozen obs kept pointing at the old spot, so the policy grasped air. In GT mode the obs
+    # tracks the nudge and v9 chases it -- that behaviour needs live updates. Live tracking also
+    # recovers drops during transport for free (no re-acquisition heuristics needed). The projection
+    # plane height follows the cube's live height (same GT-z scope as the obs z slot this mode
+    # already fills; real-robot port: gripper kinematics when held), which keeps the back-projection
+    # valid while the cube is carried. Env-0 semantics: evaluate with --num_envs 1.
+    # Smoothing window 1 = raw per-step detection. median-of-3 was tried first and its ~1-frame lag
+    # is the prime suspect for the contact-phase error (cube moves ~1cm/step while being pushed by
+    # the closing fingers; the lagged estimate trails the chase by 1-1.5cm, right at the 2cm->17%
+    # sensitivity cliff). Static jitter is sub-mm anyway (median 0.2cm pre-contact), so smoothing
+    # buys nothing where it is safe and costs accuracy exactly where it hurts.
+    vision_smooth_window = 1
+    vision_det_history: list[tuple[float, float]] = []
+    vision_prev_ep0 = -1
+
+    # The debug CSV logs ground-truth diagnostics (object/box positions from physics, lift,
+    # obj_box_dist, success = obj_box_dist < 0.05). These are GT-derived and therefore valid for
+    # ANY pose source -- the pose source only changes what the POLICY observes, not the GT outcome.
+    # So enabling this for resnet/vision lets us measure the true grasp/transport/success of the
+    # policy when it is driven by the estimated (resnet/vision) cube pose, which the funnel then
+    # quantifies. (Previously this was restricted to gt only.)
+    gt_debug_enabled = args_cli.save_gt_debug
     if args_cli.save_gt_debug and args_cli.object_pose_source != "gt":
         print(
-            "[WARNING] --save_gt_debug only applies when object_pose_source=gt; "
-            f"current source is {args_cli.object_pose_source}, so GT debug CSV logging is disabled."
+            f"[INFO] --save_gt_debug with object_pose_source={args_cli.object_pose_source}: the CSV "
+            "logs ground-truth diagnostics (success/obj_box_dist/lift from physics) while the policy "
+            "is driven by the estimated pose, so the funnel measures the true outcome under that pose source."
         )
     gt_debug_dir = os.path.abspath(args_cli.gt_debug_dir)
     gt_debug_seed = int(env_cfg.seed if env_cfg.seed is not None else 0)
@@ -490,10 +579,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "step",
         "reward",
         "object_position",
+        "obs_object_position",
         "ee_position",
         "box_position",
         "ee_obj_dist",
         "obj_box_dist",
+        "gripper_joint_pos",
         "gripper_open",
         "gripper_closed",
         "gripper_action",
@@ -555,6 +646,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         except Exception:
             return torch.full((num_envs,), float("nan"), device=env.unwrapped.device)
 
+    def _get_gripper_joint_pos() -> torch.Tensor:
+        """Raw gripper joint angle (radians); unlike gripper_open it does not saturate at 0.45."""
+        try:
+            gripper_idx = robot_asset.find_joints("gripper")[0][0]
+            return robot_asset.data.joint_pos[:, gripper_idx]
+        except Exception:
+            return torch.full((num_envs,), float("nan"), device=env.unwrapped.device)
+
     def _collect_gt_debug_rows(actions: torch.Tensor) -> list[dict[str, object]]:
         object_position = object_asset.data.root_pos_w[:, :3] - robot_asset.data.root_pos_w[:, :3]
         ee_position = _get_ee_position_robot_frame()
@@ -562,6 +661,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         ee_obj_dist = torch.norm(ee_position - object_position, dim=1)
         obj_box_dist = torch.norm(object_position - box_position, dim=1)
         gripper_open = _get_gripper_open_ratio()
+        gripper_joint_pos = _get_gripper_joint_pos()
         gripper_closed = 1.0 - gripper_open
         gripper_action = actions[:, -1] if actions.ndim == 2 and actions.shape[1] > 0 else torch.full_like(gripper_open, float("nan"))
         episode_steps = base_env.episode_length_buf.to(torch.int64) + 1
@@ -575,10 +675,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "step": int(episode_steps[env_id].item()),
                     "reward": float("nan"),
                     "object_position": _format_debug_vector(object_position[env_id]),
+                    "obs_object_position": _format_debug_vector(policy_obs_object[env_id]),
                     "ee_position": _format_debug_vector(ee_position[env_id]),
                     "box_position": _format_debug_vector(box_position[env_id]),
                     "ee_obj_dist": float(ee_obj_dist[env_id].item()),
                     "obj_box_dist": float(obj_box_dist[env_id].item()),
+                    "gripper_joint_pos": float(gripper_joint_pos[env_id].item()),
                     "gripper_open": float(gripper_open[env_id].item()),
                     "gripper_closed": float(gripper_closed[env_id].item()),
                     "gripper_action": float(gripper_action[env_id].item()),
@@ -605,6 +707,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"reward={row['reward']:.4f} "
                     f"ee_obj_dist={row['ee_obj_dist']:.4f} "
                     f"obj_box_dist={row['obj_box_dist']:.4f} "
+                    f"gripper_joint_pos={row['gripper_joint_pos']:.4f} "
                     f"gripper_open={row['gripper_open']:.4f} "
                     f"gripper_closed={row['gripper_closed']:.4f} "
                     f"gripper_action={row['gripper_action']:.4f}"
@@ -628,7 +731,44 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             estimated_object_pos = gt_object_pos_robot.clone()
             raw_resnet_object_pos = torch.full_like(gt_object_pos_robot, float("nan"))
             fallback_last_valid = False
+
+            # Diagnostic: inject a per-episode fixed XY offset into the observed object position
+            # (GT mode only). Resample the offset on each episode reset so it stays constant within
+            # an episode, then write GT+offset into the obs object slice.
+            if args_cli.object_pose_source == "gt" and args_cli.gt_pose_noise_xy > 0.0:
+                ep_steps = base_env.episode_length_buf.to(torch.int64)
+                reset_mask = (ep_steps <= 1) & (gt_noise_prev_steps >= 2) & (ep_steps < gt_noise_prev_steps)
+                first_mask = gt_noise_prev_steps < 0
+                resample = reset_mask | first_mask
+                if torch.any(resample):
+                    gt_noise_xy[resample] = torch.randn((int(resample.sum()), 2), device=gt_noise_xy.device) * args_cli.gt_pose_noise_xy
+                gt_noise_prev_steps = ep_steps.clone()
+                noisy = gt_object_pos_robot.clone()
+                noisy[:, :2] = noisy[:, :2] + gt_noise_xy
+                obs[:, object_slice[0]:object_slice[1]] = noisy
             fallback_gt = False
+
+            # Camera debug for non-vision pose sources (gt/resnet). The vision branch below saves its
+            # own annotated overlays; this saves the RAW fixed/handeye frames so the camera FOV can be
+            # inspected under any source (e.g. whether the cube enters the handeye view during the
+            # approach). Filename carries the env-0 EE-to-object distance to locate near-grasp frames.
+            if (
+                args_cli.save_camera_debug
+                and args_cli.object_pose_source != "vision"
+                and (timestep % max(1, args_cli.camera_debug_interval) == 0)
+            ):
+                ee_obj_d = torch.norm(_get_ee_position_robot_frame()[0] - gt_object_pos_robot[0]).item()
+                raw_step_tag = f"{timestep:06d}_d{ee_obj_d:.3f}"
+                if "fixed_camera" in base_env.scene.keys():
+                    raw_fixed = _extract_rgb_uint8(base_env.scene["fixed_camera"].data.output["rgb"])
+                    Image.fromarray(raw_fixed).save(
+                        os.path.join(camera_debug_dir, f"fixed_rgb_step_{raw_step_tag}.png")
+                    )
+                if "handeye_camera" in base_env.scene.keys():
+                    raw_handeye = _extract_rgb_uint8(base_env.scene["handeye_camera"].data.output["rgb"])
+                    Image.fromarray(raw_handeye).save(
+                        os.path.join(camera_debug_dir, f"handeye_rgb_step_{raw_step_tag}.png")
+                    )
 
             if args_cli.object_pose_source == "vision":
                 fixed_rgb = None
@@ -641,10 +781,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     fixed_rgb = _extract_rgb_uint8(fixed_camera.data.output["rgb"])
                     detected, pixel_center, pixel_area, component_mask = _detect_red_cube(fixed_rgb)
                     fixed_mask_u8 = _red_mask_u8(component_mask)
+                    ep0 = int(base_env.episode_length_buf[0].item())
+                    if ep0 < vision_prev_ep0:
+                        # episode reset: clear the smoothing history and the stale fallback
+                        vision_det_history.clear()
+                        last_valid_object_pos = None
+                    vision_prev_ep0 = ep0
+                    est_xy = None
                     if detected:
-                        est_x, est_y = _pixel_to_robot_xy(pixel_center, fixed_rgb.shape[1], fixed_rgb.shape[0])
-                        estimated_object_pos[:, 0] = est_x
-                        estimated_object_pos[:, 1] = est_y
+                        # Track the cube's live height so the back-projection stays valid while the
+                        # cube is lifted/carried (at-rest plane otherwise).
+                        cube_z_live = float(gt_object_pos_robot[0, 2].item())
+                        plane_z = min(max(cube_z_live, 0.005), 0.40)
+                        raw_xy = _pixel_to_robot_xy(
+                            pixel_center, fixed_rgb.shape[1], fixed_rgb.shape[0], plane_z=plane_z
+                        )
+                        vision_det_history.append(raw_xy)
+                        if len(vision_det_history) > vision_smooth_window:
+                            vision_det_history.pop(0)
+                        est_xy = (
+                            float(np.median([p[0] for p in vision_det_history])),
+                            float(np.median([p[1] for p in vision_det_history])),
+                        )
+                    else:
+                        vision_det_history.clear()
+                    if est_xy is not None:
+                        estimated_object_pos[:, 0] = est_xy[0]
+                        estimated_object_pos[:, 1] = est_xy[1]
                         last_valid_object_pos = estimated_object_pos.clone()
                     elif last_valid_object_pos is not None:
                         estimated_object_pos = last_valid_object_pos.clone()
@@ -696,7 +859,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         est_pos = resnet_estimator.estimate(fixed_camera.data.output["rgb"], gt_object_pos_robot[:, 2])
                         raw_resnet_object_pos = est_pos.clone()
 
-                        warmup_mask = episode_steps < resnet_warmup_steps
+                        # Accumulate only over the settled window [settle, warmup); the running
+                        # average is frozen once episode_step reaches warmup.
+                        warmup_mask = (episode_steps >= resnet_settle_steps) & (episode_steps < resnet_warmup_steps)
                         if torch.any(warmup_mask):
                             resnet_sum_xy[warmup_mask] += raw_resnet_object_pos[warmup_mask, :2]
                             resnet_count[warmup_mask] += 1
@@ -704,12 +869,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             cached_resnet_object_pos[warmup_mask, :2] = resnet_sum_xy[warmup_mask] / count_f
                             cached_resnet_object_pos[warmup_mask, 2] = resnet_fixed_z
 
+                        # Before any settled frame has been averaged (the settle period, or as a
+                        # fallback), use the current raw estimate as a TEMPORARY value but do NOT
+                        # persist it into the running sum/count -- otherwise the bad early frames would
+                        # pollute the settled average (the original bug).
                         no_cache_mask = resnet_count == 0
                         if torch.any(no_cache_mask):
                             cached_resnet_object_pos[no_cache_mask, :2] = raw_resnet_object_pos[no_cache_mask, :2]
                             cached_resnet_object_pos[no_cache_mask, 2] = resnet_fixed_z
-                            resnet_sum_xy[no_cache_mask] = raw_resnet_object_pos[no_cache_mask, :2]
-                            resnet_count[no_cache_mask] = 1
 
                         estimated_object_pos = cached_resnet_object_pos.clone()
                         last_valid_object_pos = estimated_object_pos.clone()
@@ -788,6 +955,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"fallback_gt={fallback_gt}"
                 )
             # agent stepping
+            # Snapshot the object slice the policy ACTUALLY sees this step (GT, GT+noise, vision or
+            # resnet estimate) so the debug CSV can quantify estimate-vs-GT error offline. obs is a
+            # TensorDict here: writing obs[:, a:b] = ... broadcasts INTO the "policy" key (which is
+            # why the injections above work) but READING obs[:, a:b] raises IndexError on the 1-dim
+            # batch, so the read must go through the "policy" entry explicitly.
+            obs_policy_tensor = obs["policy"] if hasattr(obs, "keys") and "policy" in obs.keys() else obs
+            policy_obs_object = obs_policy_tensor[:, object_slice[0]:object_slice[1]].clone()
             actions = policy(obs)
             gt_debug_rows = _collect_gt_debug_rows(actions) if gt_debug_enabled else None
             # env stepping

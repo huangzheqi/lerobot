@@ -51,3 +51,11 @@ logs/
 
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/
+
+# Large datasets and model weights (kept local, not pushed)
+data/
+selected_models/
+backups/
+**/*.local_backup
+# Office temp/lock files
+**/.~*

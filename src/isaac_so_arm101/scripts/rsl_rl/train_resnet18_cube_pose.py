@@ -44,8 +44,14 @@ class CubePoseDataset(Dataset):
         return rgb, xy
 
 
-def build_model() -> nn.Module:
-    model = models.resnet18(weights=None)
+def build_model(pretrained: bool = True) -> nn.Module:
+    # ImageNet-pretrained backbone gives a far stronger init for localising a small cube than random
+    # weights (the from-scratch model under-fit on the harder current-env images: corr ~0.75). The
+    # inference builder (vision_pose_resnet.py) uses weights=None and just loads the trained
+    # state_dict, so the chosen backbone init here does not affect deployment. Needs torchvision to
+    # fetch/cached the ImageNet weights; pass --no-pretrained to fall back to random init if offline.
+    weights = "IMAGENET1K_V1" if pretrained else None
+    model = models.resnet18(weights=weights)
     model.fc = nn.Linear(model.fc.in_features, 2)
     return model
 
@@ -64,6 +70,35 @@ def evaluate_mae(model: nn.Module, loader: DataLoader, device: torch.device) -> 
     return total_err / max(total_n, 1)
 
 
+def evaluate_fit(model: nn.Module, loader: DataLoader, device: torch.device) -> dict:
+    """Report per-axis correlation, R^2 and mean XY error (metres).
+
+    MAE alone hides the failure mode where the model ignores the image and predicts the dataset
+    mean: that still yields a modest MAE but corr~=0 / R^2<=0. A genuinely localising model has
+    corr>~0.9. Always check corr/R^2, not just MAE.
+    """
+    model.eval()
+    preds = []
+    targets = []
+    with torch.inference_mode():
+        for rgb, target_xy in loader:
+            preds.append(model(rgb.to(device)).cpu())
+            targets.append(target_xy.cpu())
+    pred = torch.cat(preds)
+    tgt = torch.cat(targets)
+    out = {}
+    for i, axis in enumerate(("x", "y")):
+        p, t = pred[:, i], tgt[:, i]
+        pc, tc = p - p.mean(), t - t.mean()
+        denom = (pc.std(unbiased=False) * tc.std(unbiased=False)).item()
+        out[f"corr_{axis}"] = (pc * tc).mean().item() / denom if denom > 1e-9 else float("nan")
+        ss_res = ((t - p) ** 2).sum().item()
+        ss_tot = (tc ** 2).sum().item()
+        out[f"r2_{axis}"] = 1.0 - ss_res / ss_tot if ss_tot > 1e-9 else float("nan")
+    out["xy_err_m"] = torch.norm(pred - tgt, dim=1).mean().item()
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="data/cube_pose_dataset")
@@ -71,6 +106,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--output", type=str, default="selected_models/resnet18_cube_pose.pt")
+    parser.add_argument(
+        "--pretrained", action=argparse.BooleanOptionalAction, default=True,
+        help="Use an ImageNet-pretrained ResNet18 backbone (default). Use --no-pretrained if offline.",
+    )
     args = parser.parse_args()
 
     dataset = CubePoseDataset(args.data_dir)
@@ -82,7 +121,7 @@ def main():
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model().to(device)
+    model = build_model(pretrained=args.pretrained).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
 
@@ -102,6 +141,16 @@ def main():
     val_mae = evaluate_mae(model, val_loader, device)
     print(f"MAE_xy(train)={train_mae:.6f}")
     print(f"MAE_xy(val)={val_mae:.6f}")
+    fit = evaluate_fit(model, val_loader, device)
+    print(
+        f"FIT(val) corr_x={fit['corr_x']:.3f} corr_y={fit['corr_y']:.3f} "
+        f"R2_x={fit['r2_x']:.3f} R2_y={fit['r2_y']:.3f} xy_err={100 * fit['xy_err_m']:.2f}cm"
+    )
+    if min(fit["corr_x"], fit["corr_y"]) < 0.8:
+        print(
+            "[WARNING] val corr < 0.8 -> the model is NOT localising the cube (likely predicting the "
+            "dataset mean). Do not deploy; check data quality / train longer / use a pretrained backbone."
+        )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

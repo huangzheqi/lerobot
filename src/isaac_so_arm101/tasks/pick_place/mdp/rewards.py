@@ -77,6 +77,36 @@ def _object_episode_initial_root_pos_w(env: ManagerBasedRLEnv, object_cfg: Scene
     return cached_pos
 
 
+def _cube_was_lifted_this_episode(
+    env: ManagerBasedRLEnv,
+    lift_threshold: float = 0.045,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Per-env latch: 1.0 once the cube has risen above `lift_threshold` at any step this episode.
+
+    Reset to 0 at episode start (episode_length_buf <= 1). Used to gate the stage-4 placement
+    rewards: with the goal lowered to table height, a cube merely dragged/pushed along the table to
+    the goal XY (never lifted) could otherwise collect the placement rewards, competing with the
+    grasp-lift-carry path. Multiplying these rewards by this latch makes "place" payable only after a
+    genuine lift, so dragging the cube to the goal earns nothing.
+
+    The latch only grows within a step, so it is safe to call from several stage-4 terms per step.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    z = obj.data.root_pos_w[:, 2]
+    cache_name = "_so101_pick_place_was_lifted"
+    latch = getattr(env, cache_name, None)
+    if latch is None or latch.shape[0] != z.shape[0] or latch.device != z.device:
+        latch = torch.zeros_like(z, dtype=torch.bool)
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is not None:
+        reset_mask = episode_length_buf.to(device=z.device) <= 1
+        latch = latch & ~reset_mask
+    latch = latch | (z > lift_threshold)
+    setattr(env, cache_name, latch)
+    return latch.float()
+
+
 def _object_height_gain(
     env: ManagerBasedRLEnv,
     initial_object_z: float,
@@ -120,6 +150,23 @@ def _gripper_open_ratio(
     joint_pos = _get_gripper_joint_pos(env, robot_cfg)
     denom = max(open_joint_pos - close_joint_pos, 1e-3)
     return torch.clamp((joint_pos - close_joint_pos) / denom, 0.0, 1.0)
+
+
+def _gripper_close_command(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Return 1.0 where the policy *commands* CLOSE, else 0.0.
+
+    Reads the binary gripper action (last action dim): action < 0 -> close, action >= 0 -> open
+    (see BinaryJointAction in isaaclab). This is robust to the achieved joint angle, so a fat cube
+    that holds the jaw partly open (theta ~0.85 rad) while firmly grasped is still counted as a
+    closed grasp -- unlike the joint-angle based `_gripper_open_ratio`, which would saturate and
+    misread it as open. Falls back to "open" (0.0) if the action buffer is unavailable.
+    """
+    action_manager = getattr(env, "action_manager", None)
+    if action_manager is None or action_manager.action is None or action_manager.action.shape[1] == 0:
+        obj_like = env.scene["object"].data.root_pos_w[:, 0]
+        return torch.zeros_like(obj_like)
+    gripper_cmd = action_manager.action[:, -1]
+    return (gripper_cmd < 0.0).float()
 
 
 def _get_wrist_flex_joint_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -185,13 +232,62 @@ def stage1_open_when_near_object_penalty(
 
 def object_lifted_from_initial_reward(
     env: ManagerBasedRLEnv,
-    min_height_gain: float,
-    initial_object_z: float = 0.015,
+    lift_cap: float,
+    min_height_gain: float = 0.0,
+    initial_object_z: float = 0.012,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Reward true lift based on height gain relative to the reset/default object height."""
-    height_gain = _object_height_gain(env, initial_object_z, object_cfg)
-    return (height_gain > min_height_gain).float()
+    """Dense lift reward: proportional to upward displacement from the true resting height.
+
+    Uses a FIXED reference height (`initial_object_z`, the cube's deterministic settled z ~0.012)
+    instead of the per-episode cached snapshot used by `_object_height_gain`. The snapshot is
+    captured at episode_length_buf <= 1, i.e. before the cube finishes settling, so it sat ~3mm
+    above the true rest height and created a dead zone where the cube had to climb back ~3mm
+    before any reward appeared. The cube's rest z is the same every episode (flat table, z not
+    randomised), so a fixed reference is both correct and free of that transient.
+
+    Dense (not a sparse gate): rewards any upward displacement from the first millimetre, so the
+    policy can climb out of the "false grasp" plateau by gradient instead of crossing a discontinuity.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    height_gain = obj.data.root_pos_w[:, 2] - initial_object_z
+    shaped = torch.clamp(height_gain - min_height_gain, min=0.0)
+    return torch.clamp(shaped / lift_cap, 0.0, 1.0)
+
+
+def lift_crossing_bonus(
+    env: ManagerBasedRLEnv,
+    lift_height: float = 0.045,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """One-time, non-farmable lift bonus: fires 1.0 only on the single step the cube first rises
+    above `lift_height` this episode, and 0.0 on every other step.
+
+    Replaces the dense `object_lifted_from_initial_reward` and the continuous `object_is_lifted`
+    term, both of which paid every step the cube was airborne and were therefore farmable by
+    lifting-and-hovering at the pickup point (the failure seen in the v14 warm-start: cube lifted
+    but never transported, grasp degraded, placement ~0). By paying only on the rising edge,
+    holding the cube up earns nothing more -- the only way to keep earning is to carry it toward the
+    goal (stage2 transport) and place it (stage3/4). The 4.5cm threshold matches the is_lifted gate
+    used everywhere else.
+
+    Uses its own cache key (separate from the `_was_lifted` gating latch) so the two never interfere.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    z = obj.data.root_pos_w[:, 2]
+    cache_name = "_so101_pick_place_lift_bonus_given"
+    given = getattr(env, cache_name, None)
+    if given is None or given.shape[0] != z.shape[0] or given.device != z.device:
+        given = torch.zeros_like(z, dtype=torch.bool)
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is not None:
+        reset_mask = episode_length_buf.to(device=z.device) <= 1
+        given = given & ~reset_mask
+    is_above = z > lift_height
+    newly = is_above & ~given  # rising edge: above the threshold now, bonus not yet paid this episode
+    given = given | is_above
+    setattr(env, cache_name, given)
+    return newly.float()
 
 
 def lifted_close_hold_reward(
@@ -231,6 +327,99 @@ def push_without_lift_penalty(
     return (pushed & not_lifted).float()
 
 
+def push_never_lifted_penalty(
+    env: ManagerBasedRLEnv,
+    move_xy_threshold: float,
+    lift_height: float = 0.045,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Penalize horizontal cube displacement while the cube has NEVER been lifted this episode.
+
+    Targets the two dominant v9 failure modes measured in the GT-heavy funnel (599 eps):
+    (a) the push-chase death spiral -- 80% of grasp failures close the gripper at the cube but skate
+    it a median 9.8cm across the table and run out of episode time chasing it; (b) the right-side
+    drag-to-goal shortcut -- cubes spawning at y<-0.07 (the goal side) grasp at only 3-9% because the
+    pre-latch v9 reward landscape paid for dragging the cube toward the goal without lifting.
+    Both behaviours displace the never-lifted cube far beyond the ~2-3cm nudge of a clean grasp, so a
+    displacement penalty prices them without touching normal contact.
+
+    Unlike `push_without_lift_penalty` (instantaneous height check), this gates on the
+    `_cube_was_lifted_this_episode` latch: after the first genuine lift the penalty is dead for the
+    rest of the episode, so a cube carried to the goal and PLACED back on the table (large
+    displacement, low height) is not penalized -- otherwise this term would fight the stage-4
+    placement rewards every step after release.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    initial_pos_w = _object_episode_initial_root_pos_w(env, object_cfg)
+    move_xy = torch.norm(obj.data.root_pos_w[:, :2] - initial_pos_w[:, :2], dim=1)
+    pushed = (move_xy > move_xy_threshold).float()
+    never_lifted = 1.0 - _cube_was_lifted_this_episode(env, lift_height, object_cfg)
+    return pushed * never_lifted
+
+
+def approach_gripper_open_reward(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    approach_outer: float,
+    lift_height: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward commanding the gripper OPEN while approaching the not-yet-lifted cube.
+
+    Teaches the correct grasp timing: approach with an open jaw so the cube can enter between
+    the fingers. Active only in the approach band (contact_distance <= ee-object distance <
+    approach_outer) and while the cube is still on the table. Mutually exclusive with
+    `grasp_close_at_contact_reward`, which takes over once the fingertips reach the cube.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    not_lifted = (obj.data.root_pos_w[:, 2] < lift_height).float()
+    approaching = ((ee_obj_dist >= contact_distance) & (ee_obj_dist < approach_outer)).float()
+    open_command = 1.0 - _gripper_close_command(env)
+    return not_lifted * approaching * open_command
+
+
+def grasp_close_at_contact_reward(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward commanding the gripper CLOSE only once the fingertips reach the cube.
+
+    The contact condition is geometric (ee-object distance < contact_distance) because contact
+    sensors are disabled on this asset. Rewards the close *command* (not the joint angle), so a
+    fat cube that holds the jaw partly open while grasped does not zero the signal.
+    """
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    at_contact = (ee_obj_dist < contact_distance).float()
+    close_command = _gripper_close_command(env)
+    return at_contact * close_command
+
+
+def lifted_close_hold_cmd_reward(
+    env: ManagerBasedRLEnv,
+    min_height_gain: float,
+    near_distance: float,
+    initial_object_z: float = 0.015,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Command-based replacement for `lifted_close_hold_reward`.
+
+    Rewards keeping the close *command* while the lifted cube stays near the end-effector. Robust
+    to the gripped joint angle (a fat cube holds the jaw at ~0.85 rad, which the joint-angle metric
+    would misread as open and zero this term).
+    """
+    height_gain = _object_height_gain(env, initial_object_z, object_cfg)
+    lifted = (height_gain > min_height_gain).float()
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < near_distance).float()
+    close_command = _gripper_close_command(env)
+    return lifted * near_object * close_command
+
+
 def stage2_goal_xy_tracking_gated(env: ManagerBasedRLEnv, std: float, lift_height: float, near_goal_xy: float,
                                   release_height: float, command_name: str,
                                   robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -263,6 +452,25 @@ def stage2_early_open_penalty_gated(
     return s2 * gripper_open
 
 
+def stage2_early_open_penalty_cmd_gated(
+    env: ManagerBasedRLEnv,
+    lift_height: float,
+    near_goal_xy: float,
+    release_height: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Command-based stage-2 early-open penalty: penalize commanding OPEN during transport.
+
+    Robust to the gripped joint angle, so a correctly-held fat cube (jaw at ~0.85 rad) is not
+    falsely penalized as "open" while being carried.
+    """
+    _, s2, _, _ = _gates(env, lift_height, near_goal_xy, release_height, command_name, robot_cfg, object_cfg)
+    open_command = 1.0 - _gripper_close_command(env)
+    return s2 * open_command
+
+
 def stage3_soft_descent_reward_gated(env: ManagerBasedRLEnv, target_speed: float, lift_height: float, near_goal_xy: float,
                                      release_height: float, command_name: str,
                                      object_cfg: SceneEntityCfg = SceneEntityCfg("object")) -> torch.Tensor:
@@ -290,7 +498,10 @@ def stage3_ee_low_near_goal_gated(
     near_goal = (xy_dist < near_goal_xy).float()
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     ee_height = ee_frame.data.target_pos_w[..., 0, 2]
-    return near_goal * torch.exp(-torch.square(ee_height - target_ee_height) / (2 * ee_height_std * ee_height_std + 1e-6))
+    # Lock behind a real lift this episode: otherwise this near-goal EE-low reward is obtainable by
+    # dragging the cube to the goal XY on the table (no lift), draining grasp-lift bootstrap pressure.
+    was_lifted = _cube_was_lifted_this_episode(env, 0.045, object_cfg)
+    return near_goal * torch.exp(-torch.square(ee_height - target_ee_height) / (2 * ee_height_std * ee_height_std + 1e-6)) * was_lifted
 
 
 def stage3_object_height_near_table_gated(
@@ -301,7 +512,10 @@ def stage3_object_height_near_table_gated(
     near_goal = (xy_dist < near_goal_xy).float()
     obj: RigidObject = env.scene[object_cfg.name]
     z = obj.data.root_pos_w[:, 2]
-    return near_goal * torch.exp(-torch.square(z - table_height) / (2 * table_margin * table_margin + 1e-6))
+    # Lock behind a real lift: this term rewards the cube AT table height near the goal, i.e. it
+    # would directly reward a cube dragged along the table to the goal. Require a genuine lift first.
+    was_lifted = _cube_was_lifted_this_episode(env, 0.045, object_cfg)
+    return near_goal * torch.exp(-torch.square(z - table_height) / (2 * table_margin * table_margin + 1e-6)) * was_lifted
 
 
 def stage3_wrist_flex_release_pose_gated(
@@ -311,7 +525,9 @@ def stage3_wrist_flex_release_pose_gated(
     xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
     near_goal = (xy_dist < near_goal_xy).float()
     wrist_pos = _get_wrist_flex_joint_pos(env, robot_cfg)
-    return near_goal * torch.exp(-torch.square(wrist_pos - wrist_target_pos) / (2 * wrist_std * wrist_std + 1e-6))
+    # Lock behind a real lift (consistent with the other stage-3 near-goal terms).
+    was_lifted = _cube_was_lifted_this_episode(env, 0.045, object_cfg)
+    return near_goal * torch.exp(-torch.square(wrist_pos - wrist_target_pos) / (2 * wrist_std * wrist_std + 1e-6)) * was_lifted
 
 
 def stage4_release_reward_gated(
@@ -335,10 +551,15 @@ def stage4_release_reward_gated(
     near_goal = xy_dist < near_goal_xy
     obj_low = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
     ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
-    lifted_enough = obj.data.root_pos_w[:, 2] > lift_height
-    release_band = obj.data.root_pos_w[:, 2] < (release_height + table_margin)
-    gate = (near_goal & obj_low & ee_low & lifted_enough & release_band).float()
-    return gate * _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
+    # Release gate: cube settled near the table (obj_low) at the goal XY with the arm lowered.
+    # The old gate also required `lifted_enough (z>lift_height=0.045)` AND `release_band`, which
+    # contradicts obj_low (z<table_height+table_margin=0.05): a placed cube rests at z~0.02, so it
+    # is obj_low but NOT lifted_enough. The intersection was a ~5mm band [0.045,0.05] -> this reward
+    # essentially never fired. Dropped both so release can be rewarded once the cube is on the table.
+    gate = (near_goal & obj_low & ee_low).float()
+    # Only payable if the cube was genuinely lifted earlier this episode (anti-drag latch).
+    was_lifted = _cube_was_lifted_this_episode(env, lift_height, object_cfg)
+    return gate * _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg) * was_lifted
 
 
 def stage4_hold_too_long_penalty_gated(
@@ -362,9 +583,9 @@ def stage4_hold_too_long_penalty_gated(
     near_goal = xy_dist < near_goal_xy
     obj_low = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
     ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
-    lifted_enough = obj.data.root_pos_w[:, 2] > lift_height
-    release_band = obj.data.root_pos_w[:, 2] < (release_height + table_margin)
-    s4 = (near_goal & obj_low & ee_low & lifted_enough & release_band).float()
+    # See stage4_release_reward_gated: the old lifted_enough & release_band made this ~5mm-band gate
+    # essentially never fire. Use the same non-degenerate "settled on table at goal" gate.
+    s4 = (near_goal & obj_low & ee_low).float()
     hold_close = 1.0 - _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
     return s4 * hold_close
 
@@ -385,7 +606,8 @@ def stage4_gripper_open_near_table_gated(env: ManagerBasedRLEnv, open_joint_pos:
 
     gripper_open = _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
 
-    return (near_goal & near_table & ee_low).float() * gripper_open
+    was_lifted = _cube_was_lifted_this_episode(env, 0.045, object_cfg)
+    return (near_goal & near_table & ee_low).float() * gripper_open * was_lifted
 
 
 def stage4_stable_placed_reward_gated(env: ManagerBasedRLEnv, xy_threshold: float, table_height: float, speed_threshold: float,
@@ -399,7 +621,8 @@ def stage4_stable_placed_reward_gated(env: ManagerBasedRLEnv, xy_threshold: floa
     good_xy = xy_dist < xy_threshold
     near_table = torch.abs(z - table_height) < 0.015
     low_speed = speed < speed_threshold
-    return (good_xy & near_table & low_speed).float()
+    was_lifted = _cube_was_lifted_this_episode(env, 0.045, object_cfg)
+    return (good_xy & near_table & low_speed).float() * was_lifted
 
 
 def stage4_ee_away_after_place_gated(env: ManagerBasedRLEnv, ee_min_distance: float, xy_threshold: float, table_height: float,
@@ -413,3 +636,81 @@ def stage4_ee_away_after_place_gated(env: ManagerBasedRLEnv, ee_min_distance: fl
     ee_w = ee_frame.data.target_pos_w[..., 0, :]
     dist = torch.norm(obj.data.root_pos_w[:, :3] - ee_w, dim=1)
     return placed * torch.clamp((dist - ee_min_distance) / max(ee_min_distance, 1e-3), min=0.0)
+
+
+def stage4_release_reward_cmd_gated(
+    env: ManagerBasedRLEnv,
+    lift_height: float,
+    near_goal_xy: float,
+    release_height: float,
+    table_height: float,
+    table_margin: float,
+    ee_low_height: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Command-based stage-4 release reward: reward commanding OPEN at the release pose.
+
+    Same geometric gate as `stage4_release_reward_gated`, but rewards the open *command* instead
+    of the joint-angle open ratio, so a still-gripped fat cube is not falsely read as released.
+    """
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    near_goal = xy_dist < near_goal_xy
+    obj_low = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+    ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
+    # See stage4_release_reward_gated: drop the degenerate lifted_enough & release_band band.
+    gate = (near_goal & obj_low & ee_low).float()
+    open_command = 1.0 - _gripper_close_command(env)
+    return gate * open_command
+
+
+def stage4_hold_too_long_penalty_cmd_gated(
+    env: ManagerBasedRLEnv,
+    lift_height: float,
+    near_goal_xy: float,
+    release_height: float,
+    table_height: float,
+    table_margin: float,
+    ee_low_height: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Command-based stage-4 hold-too-long penalty: penalize still commanding CLOSE at release pose."""
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    near_goal = xy_dist < near_goal_xy
+    obj_low = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+    ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
+    # See stage4_release_reward_gated: drop the degenerate lifted_enough & release_band band.
+    s4 = (near_goal & obj_low & ee_low).float()
+    close_command = _gripper_close_command(env)
+    return s4 * close_command
+
+
+def stage4_gripper_open_near_table_cmd_gated(
+    env: ManagerBasedRLEnv,
+    near_goal_xy: float,
+    table_height: float,
+    table_margin: float,
+    ee_low_height: float,
+    command_name: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Command-based stage-4 open-near-table reward: reward commanding OPEN once low near the goal."""
+    xy_dist, _ = _goal_metrics(env, command_name, robot_cfg, object_cfg)
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    near_goal = xy_dist < near_goal_xy
+    near_table = torch.abs(obj.data.root_pos_w[:, 2] - table_height) < table_margin
+    ee_low = ee_frame.data.target_pos_w[..., 0, 2] < ee_low_height
+    open_command = 1.0 - _gripper_close_command(env)
+    return (near_goal & near_table & ee_low).float() * open_command
