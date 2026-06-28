@@ -52,9 +52,16 @@ parser.add_argument(
 parser.add_argument(
     "--object_pose_source",
     type=str,
-    default="gt",
+    default="resnet",
     choices=["gt", "vision", "resnet"],
-    help="Source of object pose used in policy observation.",
+    help=(
+        "Source of object pose used in policy observation. "
+        "'resnet' (default) is the real-robot deployment path: a ResNet18 estimates the cube "
+        "pose from the fixed-camera RGB, which is what the physical SO-ARM101 uses. "
+        "'vision' is the colour-mask back-projection — sim-only debug, NOT transferable to the "
+        "real robot because it needs the camera extrinsics (table-plane projection) that we do "
+        "not have on hardware. 'gt' reads PhysX ground truth — sim diagnostics only."
+    ),
 )
 parser.add_argument(
     "--resnet_model_path",
