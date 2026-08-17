@@ -135,13 +135,13 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 # Enable rendering whenever cameras will be spawned: for video recording, for the vision/resnet pose
-# sources (they read fixed_camera), or for any Vision-Play task (which spawns cameras regardless of
-# the pose source). Without --enable_cameras the env raises "A camera was spawned without the
+# sources (they read fixed_camera), or for any Vision/ACT task that spawns cameras regardless of the
+# pose source. Without --enable_cameras the env raises "A camera was spawned without the
 # --enable_cameras flag" at camera init.
 if (
     args_cli.video
     or args_cli.object_pose_source in ("vision", "resnet")
-    or (args_cli.task and "Vision" in args_cli.task)
+    or (args_cli.task and ("ACT" in args_cli.task or "Vision" in args_cli.task))
 ):
     args_cli.enable_cameras = True
 
@@ -167,6 +167,9 @@ from PIL import Image, ImageDraw
 from isaac_so_arm101.scripts.rsl_rl.vision_pose_resnet import ResnetCubePoseEstimator
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+import rsl_rl.runners.on_policy_runner as rsl_on_policy_runner
+
+from isaac_so_arm101.policies import ActActorCritic
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -188,6 +191,12 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
+def _register_custom_rsl_rl_modules() -> None:
+    """Register extension policy classes for RSL-RL runner eval()."""
+
+    rsl_on_policy_runner.ActActorCritic = ActActorCritic
+
+
 def _log_gripper_action_definition(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
     actions_cfg = getattr(env_cfg, "actions", None)
     gripper_cfg = getattr(actions_cfg, "gripper_action", None)
@@ -206,7 +215,7 @@ def _log_gripper_action_definition(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCf
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
-def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+def _run(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg) -> None:
     """Play with RSL-RL agent."""
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
@@ -283,6 +292,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
+    _register_custom_rsl_rl_modules()
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
@@ -993,6 +1003,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # close the simulator
     env.close()
 
+
+def main() -> int:
+    """Run the Hydra-configured play console entrypoint."""
+    _run()
+    return 0
 
 if __name__ == "__main__":
     # run the main function

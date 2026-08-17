@@ -1,11 +1,133 @@
+import math
+
 import isaac_so_arm101.tasks.pick_place.mdp as mdp
+from isaac_so_arm101.policies.act_contract import ACT_JOINT_NAMES, EXPECTED_ACT_IMAGE_SHAPE
+from isaac_so_arm101.robots import SO_ARM101_ACT_V5_CFG
 from isaac_so_arm101.tasks.lift.joint_pos_env_cfg import SoArm101LiftCubeEnvCfg, SoArm101LiftCubeEnvCfg_PLAY
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.sim import PinholeCameraCfg, PreviewSurfaceCfg
+from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg
 from isaaclab.utils import configclass
+
+ACT_V5_GRIPPER_OPEN_JOINT_POS = 0.5
+ACT_V5_GRIPPER_CLOSED_JOINT_POS = 0.0
+ACT_V5_RESET_STATE_DEG_PERCENT = {
+    "shoulder_pan": 1.1208792,
+    "shoulder_lift": -103.27911,
+    "elbow_flex": 96.08353,
+    "wrist_flex": 55.89451,
+    "wrist_roll": -2.3912086,
+    "gripper": 5.4248366,
+}
+
+
+def _act_v5_reset_joint_pos_rad() -> dict[str, float]:
+    """Return the 20-episode v5 first-frame mean in Isaac joint units."""
+
+    reset_joint_pos = {name: math.radians(ACT_V5_RESET_STATE_DEG_PERCENT[name]) for name in ACT_JOINT_NAMES[:-1]}
+    gripper_progress = ACT_V5_RESET_STATE_DEG_PERCENT["gripper"] / 100.0
+    reset_joint_pos["gripper"] = ACT_V5_GRIPPER_OPEN_JOINT_POS - gripper_progress * (
+        ACT_V5_GRIPPER_OPEN_JOINT_POS - ACT_V5_GRIPPER_CLOSED_JOINT_POS
+    )
+    return reset_joint_pos
+
+
+@configclass
+class ActStateObservationsCfg(ObsGroup):
+    """ACT state input group: 6D SO101 joint positions."""
+
+    joint_pos = ObsTerm(func=mdp.act_joint_pos_state)
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = True
+
+
+@configclass
+class ActFixedCameraObservationsCfg(ObsGroup):
+    """ACT fixed-camera RGB input group."""
+
+    rgb = ObsTerm(func=mdp.act_fixed_camera_rgb)
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = True
+
+
+@configclass
+class ActHandeyeCameraObservationsCfg(ObsGroup):
+    """ACT hand-eye camera RGB input group."""
+
+    rgb = ObsTerm(func=mdp.act_handeye_camera_rgb)
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = True
+
+
+def _add_act_observation_groups(env_cfg) -> None:
+    """Attach ACT-specific observation groups without changing the existing PPO policy group."""
+
+    env_cfg.observations.act_state = ActStateObservationsCfg()
+    env_cfg.observations.act_fixed = ActFixedCameraObservationsCfg()
+    env_cfg.observations.act_handeye = ActHandeyeCameraObservationsCfg()
+
+
+def _configure_act_action_order(env_cfg) -> None:
+    """Make ACT env action order match the checkpoint joint order."""
+
+    env_cfg.actions.arm_action.joint_names = list(ACT_JOINT_NAMES[:-1])
+    env_cfg.actions.arm_action.preserve_order = True
+
+
+def _configure_act_input_cameras(env_cfg) -> None:
+    """Configure the two RGB cameras expected by the ACT checkpoint."""
+
+    env_cfg.commands.object_pose.debug_vis = False
+    env_cfg.scene.ee_frame.debug_vis = False
+
+    fixed_camera_pos = (0.85, -0.90, 0.90)
+    fixed_camera_rot = (0.9009, 0.3898, 0.1213, 0.1472)
+    handeye_camera_pos = (-0.013708, -0.045951, 0.082730)
+    handeye_camera_rot = (0.521917, -0.477076, 0.453010, 0.542939)
+    _, act_image_height, act_image_width = EXPECTED_ACT_IMAGE_SHAPE
+
+    env_cfg.scene.fixed_camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/fixed_camera",
+        update_period=0.0,
+        height=act_image_height,
+        width=act_image_width,
+        data_types=["rgb"],
+        spawn=PinholeCameraCfg(
+            focal_length=18.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.01, 100.0),
+        ),
+        offset=CameraCfg.OffsetCfg(pos=fixed_camera_pos, rot=fixed_camera_rot, convention="opengl"),
+    )
+
+    env_cfg.scene.light.spawn.intensity = 4500.0
+
+    env_cfg.scene.handeye_camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/wrist_link/handeye_camera",
+        update_period=0.0,
+        height=act_image_height,
+        width=act_image_width,
+        data_types=["rgb"],
+        spawn=PinholeCameraCfg(
+            focal_length=18.1475620269775,
+            focus_distance=400.0,
+            horizontal_aperture=20.954999923706055,
+            clipping_range=(0.01, 10000000.0),
+        ),
+        offset=CameraCfg.OffsetCfg(pos=handeye_camera_pos, rot=handeye_camera_rot, convention="opengl"),
+    )
 
 
 @configclass
@@ -220,6 +342,298 @@ class SoArm101PickPlaceCubeEnvCfg_PLAY(SoArm101PickPlaceCubeEnvCfg, SoArm101Lift
         # so read long-horizon runs as "can it finish given more time", not as native competence.
         self.episode_length_s = 8.0
         self.commands.object_pose.resampling_time_range = (8.0, 8.0)
+
+
+@configclass
+class SoArm101PickPlaceCubeActObsEnvCfg(SoArm101PickPlaceCubeEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        # ACT consumes two high-resolution camera streams, so keep the default ACT env count small.
+        # Users can still override this with --num_envs from the train script.
+        self.scene.num_envs = 4
+
+        # v32 ACT-only contact stress test: v31 showed sub-millimetre cube rise but never opened the
+        # real lift gate. Keep base pick-place unchanged and make this ACT run intentionally easier
+        # physically so we can tell whether the remaining blocker is contact geometry/action pose.
+        self.scene.object.spawn.mass_props = MassPropertiesCfg(mass=0.015)
+        act_contact_material = RigidBodyMaterialCfg(
+            static_friction=2.0,
+            dynamic_friction=1.5,
+            restitution=0.0,
+            friction_combine_mode="max",
+        )
+        self.sim.physics_material = act_contact_material
+        self.scene.object.spawn.physics_material = RigidBodyMaterialCfg(
+            static_friction=2.0,
+            dynamic_friction=1.5,
+            restitution=0.0,
+            friction_combine_mode="max",
+        )
+        self.scene.table.spawn.physics_material = RigidBodyMaterialCfg(
+            static_friction=2.0,
+            dynamic_friction=1.5,
+            restitution=0.0,
+            friction_combine_mode="max",
+        )
+        self.scene.robot.spawn.articulation_props.solver_position_iteration_count = 24
+        self.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = 12
+        self.scene.object.spawn.rigid_props.solver_position_iteration_count = 32
+        self.scene.object.spawn.rigid_props.solver_velocity_iteration_count = 12
+        self.scene.robot.actuators["gripper"].effort_limit_sim = 10.0
+        self.scene.robot.actuators["gripper"].stiffness = 160.0
+        self.scene.robot.actuators["gripper"].damping = 50.0
+
+        # ACT starts out-of-distribution in sim, so do not apply the final v9 smoothness penalties
+        # from step 0. The residual actor needs early freedom to correct the real-to-sim prior.
+        self.rewards.action_rate.weight = -1.0e-4
+        self.rewards.joint_vel.weight = -1.0e-4
+        self.curriculum.action_rate.params["num_steps"] = 1_000_000_000
+        self.curriculum.joint_vel.params["num_steps"] = 1_000_000_000
+
+        # ACT-only bootstrap: v23 reached the cube only in sparse spikes and never opened the
+        # lift/transport gates. Widen the early reward basin and add command-timing hints so PPO can
+        # first learn a stable approach-grasp-lift entry before optimizing the later placement stages.
+        self.rewards.reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.12}, weight=3.0)
+        self.rewards.act_approach_gripper_open = RewTerm(
+            func=mdp.approach_gripper_open_reward,
+            params={"contact_distance": 0.10, "approach_outer": 0.18, "lift_height": 0.045},
+            weight=0.2,
+        )
+        self.rewards.act_grasp_close_at_contact = RewTerm(
+            func=mdp.grasp_close_at_contact_reward, params={"contact_distance": 0.10}, weight=1.0
+        )
+        self.rewards.act_grasp_close_true_contact = RewTerm(
+            func=mdp.grasp_close_at_contact_reward, params={"contact_distance": 0.06}, weight=5.0
+        )
+        self.rewards.act_open_at_contact_penalty = RewTerm(
+            func=mdp.grasp_open_at_contact_penalty, params={"contact_distance": 0.10}, weight=-1.5
+        )
+        self.rewards.act_closed_near_upward_motion = RewTerm(
+            func=mdp.closed_near_upward_motion_reward,
+            params={"contact_distance": 0.09, "target_up_delta": 0.0015, "lift_height": 0.055},
+            weight=6.0,
+        )
+        self.rewards.act_closed_contact_lift_pose = RewTerm(
+            func=mdp.closed_contact_lift_pose_reward,
+            params={"contact_distance": 0.09, "target_ee_above_object": 0.035, "lift_height": 0.055},
+            weight=1.0,
+        )
+        self.rewards.act_closed_contact_object_rise = RewTerm(
+            func=mdp.closed_contact_object_rise_reward,
+            params={
+                "contact_distance": 0.09,
+                "lift_cap": 0.025,
+                "lift_height": 0.055,
+                "min_height_gain": 0.002,
+                "initial_object_z": 0.015,
+            },
+            weight=30.0,
+        )
+        self.rewards.act_dense_lift_from_table = RewTerm(
+            func=mdp.object_lifted_from_initial_reward,
+            params={"lift_cap": 0.025, "min_height_gain": 0.002, "initial_object_z": 0.015},
+            weight=40.0,
+        )
+        self.rewards.act_lifted_close_hold_cmd = RewTerm(
+            func=mdp.lifted_close_hold_cmd_reward,
+            params={"min_height_gain": 0.003, "near_distance": 0.10, "initial_object_z": 0.015},
+            weight=10.0,
+        )
+        self.rewards.act_diag_object_height_gain_m = RewTerm(
+            func=mdp.diag_object_height_gain_m,
+            params={"initial_object_z": 0.015, "height_cap": 0.08},
+            weight=1.0,
+        )
+        self.rewards.act_diag_gripper_closed_joint = RewTerm(
+            func=mdp.diag_gripper_closed_joint_ratio,
+            params={"open_joint_pos": 0.5, "close_joint_pos": 0.0},
+            weight=0.01,
+        )
+        self.rewards.act_diag_near_object_06 = RewTerm(
+            func=mdp.diag_near_object,
+            params={"contact_distance": 0.06},
+            weight=0.01,
+        )
+        _configure_act_action_order(self)
+        _configure_act_input_cameras(self)
+        _add_act_observation_groups(self)
+
+
+@configclass
+class SoArm101PickPlaceCubeActObsEnvCfg_PLAY(SoArm101PickPlaceCubeActObsEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.policy.object_position.noise = None
+        self.episode_length_s = 8.0
+        self.commands.object_pose.resampling_time_range = (8.0, 8.0)
+
+
+@configclass
+class SoArm101PickPlaceCubeActV5EnvCfg(SoArm101PickPlaceCubeEnvCfg):
+    """Factory-zero ACT-v5 environment isolated from the legacy v4/v32 task."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.robot = SO_ARM101_ACT_V5_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.init_state.joint_pos.update(_act_v5_reset_joint_pos_rad())
+        self.actions.gripper_action = mdp.JointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["gripper"],
+            scale=ACT_V5_GRIPPER_OPEN_JOINT_POS,
+            offset=0.0,
+            use_default_offset=False,
+            preserve_order=True,
+        )
+        _configure_act_action_order(self)
+        _configure_act_input_cameras(self)
+        _add_act_observation_groups(self)
+
+
+@configclass
+class SoArm101PickPlaceCubeActV5EnvCfg_PLAY(SoArm101PickPlaceCubeActV5EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.policy.object_position.noise = None
+        self.episode_length_s = 8.0
+        self.commands.object_pose.resampling_time_range = (8.0, 8.0)
+
+
+@configclass
+class SoArm101PickPlaceCubeActV34EnvCfg(SoArm101PickPlaceCubeActObsEnvCfg):
+    """Factory-zero ACT-v5 task with safe prior motion and ACT bootstrap rewards."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Reuse the v32 ACT reward/contact bootstrap, then replace its legacy robot
+        # with the factory-zero V5 articulation and action contract.
+        self.scene.robot = SO_ARM101_ACT_V5_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.init_state.joint_pos.update(_act_v5_reset_joint_pos_rad())
+        self.scene.robot.spawn.articulation_props.solver_position_iteration_count = 24
+        self.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = 12
+        self.scene.robot.actuators["gripper"].effort_limit_sim = 10.0
+        self.scene.robot.actuators["gripper"].stiffness = 160.0
+        self.scene.robot.actuators["gripper"].damping = 50.0
+        self.actions.gripper_action = mdp.JointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["gripper"],
+            scale=ACT_V5_GRIPPER_OPEN_JOINT_POS,
+            offset=0.0,
+            use_default_offset=False,
+            preserve_order=True,
+        )
+        _configure_act_action_order(self)
+
+        # The real demonstrations last about 20 seconds. Keep the command fixed for
+        # the same horizon so it cannot jump to a new goal midway through a rollout.
+        self.episode_length_s = 20.0
+        self.commands.object_pose.resampling_time_range = (20.0, 20.0)
+
+
+@configclass
+class SoArm101PickPlaceCubeActV34EnvCfg_PLAY(SoArm101PickPlaceCubeActV34EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.policy.object_position.noise = None
+
+
+@configclass
+class SoArm101PickPlaceCubeActV35EnvCfg(SoArm101PickPlaceCubeActV34EnvCfg):
+    """V34 ACT-v5 task with self-collisions disabled for a stable reset pose."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.robot.spawn.articulation_props.enabled_self_collisions = False
+
+
+@configclass
+class SoArm101PickPlaceCubeActV35EnvCfg_PLAY(SoArm101PickPlaceCubeActV35EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.policy.object_position.noise = None
+
+
+@configclass
+class SoArm101PickPlaceCubeActV36EnvCfg(SoArm101PickPlaceCubeActV35EnvCfg):
+    """V35 dynamics with rewards aligned to the 1=open, 0=closed action contract."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        gripper_action_contract = {"open_action": 1.0, "close_action": 0.0}
+        close_aware_terms = (
+            "act_approach_gripper_open",
+            "act_grasp_close_at_contact",
+            "act_grasp_close_true_contact",
+            "act_open_at_contact_penalty",
+            "act_closed_near_upward_motion",
+            "act_closed_contact_lift_pose",
+            "act_closed_contact_object_rise",
+            "act_lifted_close_hold_cmd",
+        )
+        for term_name in close_aware_terms:
+            getattr(self.rewards, term_name).params.update(gripper_action_contract)
+
+        # Low-weight diagnostics expose the sampled PPO action contract in TensorBoard.
+        # TensorBoard reports episode-integrated values, so use them for trend comparison
+        # rather than interpreting them as an instantaneous [0, 1] ratio.
+        self.rewards.act_diag_gripper_close_action_progress = RewTerm(
+            func=mdp.diag_gripper_close_action_progress,
+            params=gripper_action_contract,
+            weight=0.01,
+        )
+        self.rewards.act_diag_near_object_10 = RewTerm(
+            func=mdp.diag_near_object,
+            params={"contact_distance": 0.10},
+            weight=0.01,
+        )
+
+
+@configclass
+class SoArm101PickPlaceCubeActV36EnvCfg_PLAY(SoArm101PickPlaceCubeActV36EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.policy.object_position.noise = None
+
+
+@configclass
+class SoArm101PickPlaceCubeActV37EnvCfg(SoArm101PickPlaceCubeActV36EnvCfg):
+    """V36 environment paired with the new factory-zero ACT checkpoint."""
+
+
+@configclass
+class SoArm101PickPlaceCubeActV37EnvCfg_PLAY(SoArm101PickPlaceCubeActV37EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 4
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.policy.object_position.noise = None
 
 
 @configclass

@@ -79,3 +79,9 @@ SO_ARM101_CFG = ArticulationCfg(
     soft_joint_pos_limit_factor=0.9,
 )
 
+SO_ARM101_ACT_V5_CFG = SO_ARM101_CFG.replace(
+    spawn=SO_ARM101_CFG.spawn.replace(
+        asset_path=f"{TEMPLATE_ASSETS_DATA_DIR}/urdf/so_arm101_act_v5.urdf"
+    )
+)
+

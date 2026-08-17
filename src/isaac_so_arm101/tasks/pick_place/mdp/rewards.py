@@ -8,6 +8,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 from isaaclab.utils.math import combine_frame_transforms
 
+from isaac_so_arm101.policies.act_joint_mapping import gripper_action_to_close_progress
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -152,21 +154,31 @@ def _gripper_open_ratio(
     return torch.clamp((joint_pos - close_joint_pos) / denom, 0.0, 1.0)
 
 
-def _gripper_close_command(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Return 1.0 where the policy *commands* CLOSE, else 0.0.
+def _gripper_close_command(
+    env: ManagerBasedRLEnv,
+    open_action: float | None = None,
+    close_action: float | None = None,
+) -> torch.Tensor:
+    """Return gripper command closure progress.
 
-    Reads the binary gripper action (last action dim): action < 0 -> close, action >= 0 -> open
-    (see BinaryJointAction in isaaclab). This is robust to the achieved joint angle, so a fat cube
-    that holds the jaw partly open (theta ~0.85 rad) while firmly grasped is still counted as a
-    closed grasp -- unlike the joint-angle based `_gripper_open_ratio`, which would saturate and
-    misread it as open. Falls back to "open" (0.0) if the action buffer is unavailable.
+    Without explicit endpoints this preserves the legacy binary contract where
+    negative means close. V36 passes 1=open and 0=closed so intermediate PPO
+    actions provide a dense closure signal instead of being misread as open.
     """
     action_manager = getattr(env, "action_manager", None)
     if action_manager is None or action_manager.action is None or action_manager.action.shape[1] == 0:
         obj_like = env.scene["object"].data.root_pos_w[:, 0]
         return torch.zeros_like(obj_like)
     gripper_cmd = action_manager.action[:, -1]
-    return (gripper_cmd < 0.0).float()
+    if open_action is None and close_action is None:
+        return (gripper_cmd < 0.0).float()
+    if open_action is None or close_action is None:
+        raise ValueError("open_action and close_action must be provided together")
+    return gripper_action_to_close_progress(
+        gripper_cmd,
+        open_action=open_action,
+        close_action=close_action,
+    )
 
 
 def _get_wrist_flex_joint_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -362,6 +374,8 @@ def approach_gripper_open_reward(
     contact_distance: float,
     approach_outer: float,
     lift_height: float,
+    open_action: float | None = None,
+    close_action: float | None = None,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
@@ -376,13 +390,15 @@ def approach_gripper_open_reward(
     ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
     not_lifted = (obj.data.root_pos_w[:, 2] < lift_height).float()
     approaching = ((ee_obj_dist >= contact_distance) & (ee_obj_dist < approach_outer)).float()
-    open_command = 1.0 - _gripper_close_command(env)
+    open_command = 1.0 - _gripper_close_command(env, open_action, close_action)
     return not_lifted * approaching * open_command
 
 
 def grasp_close_at_contact_reward(
     env: ManagerBasedRLEnv,
     contact_distance: float,
+    open_action: float | None = None,
+    close_action: float | None = None,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
@@ -394,8 +410,156 @@ def grasp_close_at_contact_reward(
     """
     ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
     at_contact = (ee_obj_dist < contact_distance).float()
-    close_command = _gripper_close_command(env)
+    close_command = _gripper_close_command(env, open_action, close_action)
     return at_contact * close_command
+
+
+def grasp_open_at_contact_penalty(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    open_action: float | None = None,
+    close_action: float | None = None,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Penalize keeping the gripper OPEN once the end-effector reaches the grasp zone."""
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    at_contact = (ee_obj_dist < contact_distance).float()
+    open_command = 1.0 - _gripper_close_command(env, open_action, close_action)
+    return at_contact * open_command
+
+
+def closed_near_upward_motion_reward(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    target_up_delta: float,
+    lift_height: float,
+    open_action: float | None = None,
+    close_action: float | None = None,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward lifting intent after a close command near the cube, before the cube is airborne."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_z = ee_frame.data.target_pos_w[..., 0, 2]
+
+    cache_name = "_so101_pick_place_prev_ee_z"
+    prev_ee_z = getattr(env, cache_name, None)
+    if prev_ee_z is None or prev_ee_z.shape != ee_z.shape or prev_ee_z.device != ee_z.device:
+        prev_ee_z = ee_z.detach()
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is not None:
+        reset_mask = episode_length_buf.to(device=ee_z.device) <= 1
+        prev_ee_z = torch.where(reset_mask, ee_z.detach(), prev_ee_z.to(device=ee_z.device, dtype=ee_z.dtype))
+
+    up_delta = ee_z - prev_ee_z
+    setattr(env, cache_name, ee_z.detach())
+
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < contact_distance).float()
+    close_command = _gripper_close_command(env, open_action, close_action)
+    not_lifted = (obj.data.root_pos_w[:, 2] < lift_height).float()
+    upward = torch.clamp(up_delta / max(target_up_delta, 1.0e-6), 0.0, 1.0)
+    return near_object * close_command * not_lifted * upward
+
+
+def closed_contact_lift_pose_reward(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    target_ee_above_object: float,
+    lift_height: float,
+    open_action: float | None = None,
+    close_action: float | None = None,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward a closed contact pose that raises the gripper above the cube before lift.
+
+    The v28 policy learned contact and close commands but often lost the lift before the cube moved
+    enough for object-height rewards to activate. This term gives a continuous bridge: while the
+    cube is still on the table, reward close commands near the cube as the end-effector rises above
+    the cube center.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_z = ee_frame.data.target_pos_w[..., 0, 2]
+    obj_z = obj.data.root_pos_w[:, 2]
+
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < contact_distance).float()
+    close_command = _gripper_close_command(env, open_action, close_action)
+    not_lifted = (obj_z < lift_height).float()
+    ee_above_object = torch.clamp((ee_z - obj_z) / max(target_ee_above_object, 1.0e-6), 0.0, 1.0)
+    return near_object * close_command * not_lifted * ee_above_object
+
+
+def closed_contact_object_rise_reward(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    lift_cap: float,
+    lift_height: float,
+    min_height_gain: float = 0.0,
+    initial_object_z: float = 0.015,
+    open_action: float | None = None,
+    close_action: float | None = None,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward real object rise while the gripper is commanded closed at the grasp zone.
+
+    v30 could farm a closed, above-cube end-effector pose without moving the cube. This term only
+    pays when the cube center actually rises from the table, and gates that rise by the same
+    close-at-contact condition used by the ACT bootstrap rewards.
+    """
+    obj: RigidObject = env.scene[object_cfg.name]
+    ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
+    near_object = (ee_obj_dist < contact_distance).float()
+    close_command = _gripper_close_command(env, open_action, close_action)
+    not_lifted = (obj.data.root_pos_w[:, 2] < lift_height).float()
+    height_gain = obj.data.root_pos_w[:, 2] - initial_object_z
+    shaped_rise = torch.clamp((height_gain - min_height_gain) / max(lift_cap, 1.0e-6), 0.0, 1.0)
+    return near_object * close_command * not_lifted * shaped_rise
+
+
+def diag_object_height_gain_m(
+    env: ManagerBasedRLEnv,
+    initial_object_z: float = 0.015,
+    height_cap: float = 0.08,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Diagnostic: cube center height gain in meters, clipped to a useful TensorBoard range."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    return torch.clamp(obj.data.root_pos_w[:, 2] - initial_object_z, 0.0, height_cap)
+
+
+def diag_gripper_closed_joint_ratio(
+    env: ManagerBasedRLEnv,
+    open_joint_pos: float,
+    close_joint_pos: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Diagnostic: achieved gripper closure from joint position, 1.0=closed and 0.0=open."""
+    return 1.0 - _gripper_open_ratio(env, open_joint_pos, close_joint_pos, robot_cfg)
+
+
+def diag_gripper_close_action_progress(
+    env: ManagerBasedRLEnv,
+    open_action: float,
+    close_action: float,
+) -> torch.Tensor:
+    """Diagnostic: commanded closure progress, 1.0=closed and 0.0=open."""
+    return _gripper_close_command(env, open_action, close_action)
+
+
+def diag_near_object(
+    env: ManagerBasedRLEnv,
+    contact_distance: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Diagnostic: 1.0 when the end-effector frame is inside the geometric grasp zone."""
+    return (_ee_object_distance(env, object_cfg, ee_frame_cfg) < contact_distance).float()
 
 
 def lifted_close_hold_cmd_reward(
@@ -403,6 +567,8 @@ def lifted_close_hold_cmd_reward(
     min_height_gain: float,
     near_distance: float,
     initial_object_z: float = 0.015,
+    open_action: float | None = None,
+    close_action: float | None = None,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
@@ -416,7 +582,7 @@ def lifted_close_hold_cmd_reward(
     lifted = (height_gain > min_height_gain).float()
     ee_obj_dist = _ee_object_distance(env, object_cfg, ee_frame_cfg)
     near_object = (ee_obj_dist < near_distance).float()
-    close_command = _gripper_close_command(env)
+    close_command = _gripper_close_command(env, open_action, close_action)
     return lifted * near_object * close_command
 
 
