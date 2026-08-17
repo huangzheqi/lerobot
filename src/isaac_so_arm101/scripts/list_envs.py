@@ -30,7 +30,7 @@ from prettytable import PrettyTable
 import isaac_so_arm101.tasks  # noqa: F401
 
 
-def main():
+def main() -> int:
     """Print all environments registered in `isaaclab_tasks` extension."""
     # print all the available environments
     table = PrettyTable(["S. No.", "Task Name", "Entry Point", "Config"])
@@ -51,6 +51,7 @@ def main():
             index += 1
 
     print(table)
+    return 0
 
 
 if __name__ == "__main__":

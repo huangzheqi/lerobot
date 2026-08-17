@@ -9,6 +9,7 @@
 
 import argparse
 import sys
+from typing import NoReturn
 
 from isaaclab.app import AppLauncher
 
@@ -31,14 +32,24 @@ parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
+parser.add_argument(
+    "--fast_exit",
+    action="store_true",
+    default=False,
+    help="Exit immediately after successful headless training, bypassing Isaac Sim cleanup.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-# always enable cameras to record video
-if args_cli.video:
+if args_cli.fast_exit and not args_cli.headless:
+    parser.error("--fast_exit requires --headless.")
+
+# Always enable cameras for video recording and camera-observation tasks. Without this, Isaac Lab
+# raises "A camera was spawned without the --enable_cameras flag" during environment construction.
+if args_cli.video or (args_cli.task and ("ACT" in args_cli.task or "Vision" in args_cli.task)):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -79,6 +90,9 @@ from datetime import datetime
 
 import omni
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+import rsl_rl.runners.on_policy_runner as rsl_on_policy_runner
+
+from isaac_so_arm101.policies import ActActorCritic
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -105,6 +119,31 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _fast_exit_after_training(runner: object) -> NoReturn:
+    """Flush Python-side logs and bypass Isaac Sim native cleanup."""
+
+    writer = getattr(runner, "writer", None)
+    flush_writer = getattr(writer, "flush", None)
+    if callable(flush_writer):
+        try:
+            flush_writer()
+        except Exception as exc:
+            print(f"[WARNING] Failed to flush the RSL-RL writer before fast exit: {exc!r}", file=sys.stderr)
+
+    print("[INFO] --fast_exit enabled: training completed; skipping Isaac Sim cleanup.")
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(0)
+
+
+def _register_custom_rsl_rl_modules() -> None:
+    """Register extension policy classes for RSL-RL runner eval()."""
+
+    rsl_on_policy_runner.ActActorCritic = ActActorCritic
+
+
 def _log_gripper_action_definition(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
     actions_cfg = getattr(env_cfg, "actions", None)
     gripper_cfg = getattr(actions_cfg, "gripper_action", None)
@@ -123,7 +162,7 @@ def _log_gripper_action_definition(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCf
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
-def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+def _run(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg) -> None:
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
@@ -206,6 +245,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # create runner from rsl-rl
+    _register_custom_rsl_rl_modules()
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
@@ -227,9 +267,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
+    if args_cli.fast_exit:
+        _fast_exit_after_training(runner)
+
     # close the simulator
     env.close()
 
+
+def main() -> int:
+    """Run the Hydra-configured training console entrypoint."""
+    _run()
+    return 0
 
 if __name__ == "__main__":
     # run the main function

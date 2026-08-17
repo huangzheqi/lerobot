@@ -36,7 +36,7 @@ import isaac_so_arm101.tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 
-def main():
+def main() -> int:
     """Zero actions agent with Isaac Lab environment."""
     # parse configuration
     env_cfg = parse_env_cfg(
@@ -61,6 +61,7 @@ def main():
 
     # close the simulator
     env.close()
+    return 0
 
 
 if __name__ == "__main__":
